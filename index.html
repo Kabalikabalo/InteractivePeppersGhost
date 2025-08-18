@@ -1,174 +1,140 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Earth – Zoom by Thumb–Index Distance (with Readout)</title>
-<style>
-  html,body {height:100%}
-  body {margin:0; background:#000; color:#eee; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif}
-  #view {width:100vw; height:100vh; display:block; background:#000}
-  #cam {display:none}
-  #tap {position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000}
-  button {font-size:1rem; padding:.6rem 1rem; border-radius:.5rem; border:1px solid #444; background:#111; color:#fff}
-  #hud {position:fixed; left:12px; top:12px; background:rgba(0,0,0,.55); padding:10px 12px; border-radius:10px; font-size:14px; line-height:1.35}
-  .bar {width:220px; height:8px; background:#333; border-radius:4px; margin-top:6px; overflow:hidden}
-  .fill {height:100%; width:0%; background:#4caf50}
-  .hint {position:fixed; left:12px; bottom:12px; opacity:.8; font-size:13px}
-</style>
+  <meta charset="utf-8" />
+  <title>Gesture Gallery (GestureRecognizer, Minimal)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; background: #000; overflow: hidden; }
+    /* Only the image is visible */
+    #ghost {
+      position: absolute; inset: 0; margin: auto;
+      max-width: 90vw; max-height: 90vh; object-fit: contain;
+      transform: scale(1) translateZ(0); transition: transform 0.12s ease;
+      user-select: none; pointer-events: none; filter: drop-shadow(0 0 30px rgba(0,0,0,0.6));
+    }
+    /* Hidden video for the recognizer */
+    #cam { display: none; }
+    /* One-tap starter (required by some browsers for cam permissions) */
+    #tap {
+      position: absolute; inset: 0; display: grid; place-items: center;
+      color: #888; font: 600 14px system-ui; background: transparent; cursor: pointer;
+    }
+    #tap.hide { display: none; }
+  </style>
 </head>
 <body>
-<canvas id="view"></canvas>
-<video id="cam" playsinline muted></video>
-<div id="tap"><button id="startBtn">Start Camera</button></div>
+  <img id="ghost" alt="image" />
+  <video id="cam" autoplay playsinline muted></video>
+  <div id="tap">tap/click to start camera</div>
 
-<!-- Live distance readout -->
-<div id="hud">
-  <div><strong>Thumb–Index distance</strong></div>
-  <div>Current d: <span id="dVal">—</span></div>
-  <div>Observed range: <span id="minVal">—</span> … <span id="maxVal">—</span></div>
-  <div>Normalized t (0..1): <span id="tVal">—</span></div>
-  <div class="bar"><div id="barFill" class="fill"></div></div>
-</div>
+  <!-- Use MediaPipe Tasks Vision (GestureRecognizer) -->
+  <script type="module">
+    import {
+      GestureRecognizer,
+      FilesetResolver
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-<div class="hint">Closer fingers ⇒ smaller • Farther ⇒ bigger • R = reset</div>
+    // Public images that read well on black
+    const IMAGES = [
+      "https://upload.wikimedia.org/wikipedia/commons/9/97/The_Earth_seen_from_Apollo_17.jpg",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/NGC2207%2BIC2163.jpg/640px-NGC2207%2BIC2163.jpg",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f5/Venus_colour.png/640px-Venus_colour.png",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5a/NGC6543.jpg/640px-NGC6543.jpg",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/Crab_Nebula.jpg/640px-Crab_Nebula.jpg"
+    ];
 
-<script type="module">
-import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+    const imgEl  = document.getElementById('ghost');
+    const videoEl = document.getElementById('cam');
+    const tapEl   = document.getElementById('tap');
 
-const canvas = document.getElementById('view');
-const ctx = canvas.getContext('2d', { alpha:false });
-const cam = document.getElementById('cam');
-const overlay = document.getElementById('tap');
-const btn = document.getElementById('startBtn');
+    let idx = 0;
+    let scale = 1;
+    const SCALE_MIN = 0.4, SCALE_MAX = 2.8, SCALE_STEP = 0.02;
 
-// HUD elements
-const dOut   = document.getElementById('dVal');
-const minOut = document.getElementById('minVal');
-const maxOut = document.getElementById('maxVal');
-const tOut   = document.getElementById('tVal');
-const bar    = document.getElementById('barFill');
+    function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+    function setScale(s){ scale = clamp(s, SCALE_MIN, SCALE_MAX); imgEl.style.transform = `scale(${scale}) translateZ(0)`; }
 
-// 🌍 Earth image
-const img = new Image();
-img.crossOrigin = "anonymous";
-img.src = "https://upload.wikimedia.org/wikipedia/commons/9/97/The_Earth_seen_from_Apollo_17.jpg";
-await img.decode();
+    // preload with onerror-skip
+    function showImage(i, depth=0){
+      if (depth > IMAGES.length) return; // stop if all fail
+      const safe = ((i % IMAGES.length) + IMAGES.length) % IMAGES.length;
+      idx = safe;
+      const probe = new Image();
+      probe.onload  = () => { imgEl.src = IMAGES[idx]; };
+      probe.onerror = () => { showImage(idx + 1, depth + 1); }; // skip broken
+      probe.src = IMAGES[idx];
+    }
+    showImage(idx);
+    setScale(1);
 
-// --- State (center fixed; only scale changes) ---
-let cx=0, cy=0;
-let scale=0.8, targetScale=0.8;
-const EASE = 0.25;
+    // Debounce "Pointing_Up" → next image
+    let lastPointAt = 0;
+    const POINT_COOLDOWN_MS = 700;
 
-// distance→scale mapping
-const MIN_SCALE = 0.15;
-const MAX_SCALE = 2.8;
-let DIST_MIN = 0.01;   // “touching” (we’ll keep it at 0)
-let DIST_MAX = 0.20;   // typical max spread; tweak if needed
+    // Map gesture labels -> actions
+    function handleGesture(label){
+      if (label === "Open_Palm") {
+        setScale(scale + SCALE_STEP);
+      } else if (label === "Closed_Fist") {
+        setScale(scale - SCALE_STEP);
+      } else if (label === "Thumb_Up") {
+        const now = performance.now();
+        if (now - lastPointAt > POINT_COOLDOWN_MS) {
+          lastPointAt = now;
+          showImage(idx + 1);
+        }
+      }
+    }
 
-let lastVideoTime = -1;
-let minD = Infinity, maxD = 0;
+    let started = false;
+    async function start(){
+      if (started) return; started = true;
+      tapEl.classList.add('hide');
 
-// --- Resize ---
-function resize(){
-  const dpr = Math.min(window.devicePixelRatio||1, 2);
-  canvas.width  = Math.floor(innerWidth  * dpr);
-  canvas.height = Math.floor(innerHeight * dpr);
-  cx = canvas.width/2;
-  cy = canvas.height/2;
-}
-window.addEventListener('resize', resize); resize();
+      // Prepare camera
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }});
+      videoEl.srcObject = stream;
+      await videoEl.play();
 
-// --- MediaPipe Hands ---
-const files = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
-const hands = await HandLandmarker.createFromOptions(files, {
-  baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" },
-  runningMode:"VIDEO",
-  numHands:1,
-  minHandDetectionConfidence:0.5,
-  minHandPresenceConfidence:0.5,
-  minTrackingConfidence:0.5
-});
+      // Load WASM core and the gesture model
+      const fileset = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+      const recognizer = await GestureRecognizer.createFromOptions(fileset, {
+        baseOptions: {
+          // Official hosted model (float16) from Google
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task"
+        },
+        runningMode: "VIDEO",
+        numHands: 1
+      });
 
-// --- Camera ---
-async function startCam(){
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video:{ facingMode:{ideal:"environment"}, width:{ideal:640}, height:{ideal:480}, frameRate:{ideal:30, max:30} },
-    audio:false
-  });
-  cam.srcObject = stream;
-  await cam.play();
-  loop();
-}
+      // Video loop
+      const loop = () => {
+        const now = performance.now();
+        const result = recognizer.recognizeForVideo(videoEl, now);
+        // result.gestures: Array per hand, with classification list
+        if (result && result.gestures && result.gestures.length > 0) {
+          const top = result.gestures[0][0]; // highest score classification for first hand
+          if (top && top.categoryName && top.score > 0.6) {
+            handleGesture(top.categoryName);
+          }
+        }
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    }
 
-function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-
-// --- Main loop ---
-function loop(){
-  requestAnimationFrame(loop);
-
-  // background
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-
-  // smooth scaling
-  scale += (targetScale - scale) * EASE;
-
-  // draw Earth centered
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.scale(scale, scale);
-  ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(img, -img.width/2, -img.height/2);
-  ctx.restore();
-
-  if (!cam.videoWidth) return;
-  const vt = cam.currentTime;
-  if (vt === lastVideoTime) return;
-  lastVideoTime = vt;
-
-  const res = hands.detectForVideo(cam, performance.now());
-  if (!res?.landmarks?.length) {
-    dOut.textContent = '—';
-    tOut.textContent = '—';
-    return;
-  }
-
-  const lm = res.landmarks[0];
-    let d = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y); // thumb–index distance (normalized)
-    // Round distance to nearest 0.005
-    d = Math.round(d / 0.005) * 0.005;
-
-  // track observed range for your setup
-  minD = Math.min(minD, d);
-  maxD = Math.max(maxD, d);
-
-  // map to 0..1, then to scale
-  const t = clamp((d - DIST_MIN) / (DIST_MAX - DIST_MIN), 0, 1);
-  targetScale = MIN_SCALE + t * (MAX_SCALE - MIN_SCALE);
-
-  // update HUD
-  dOut.textContent   = d.toFixed(3);
-  minOut.textContent = (isFinite(minD) ? minD.toFixed(3) : '—');
-  maxOut.textContent = (maxD > 0 ? maxD.toFixed(3) : '—');
-  tOut.textContent   = t.toFixed(2);
-  bar.style.width    = `${(t*100).toFixed(0)}%`;
-}
-
-// --- Reset key ---
-window.addEventListener('keydown', e=>{
-  if (e.key.toLowerCase() === 'r') {
-    targetScale = 0.8;
-    // Reset observed range (optional)
-    minD = Infinity; maxD = 0;
-  }
-});
-
-// --- Go ---
-btn.addEventListener('click', async ()=>{
-  try { await startCam(); overlay.style.display='none'; }
-  catch(e){ alert('Camera failed: ' + e.message); console.error(e); }
-});
-</script>
+    // Start on user interaction (required by some browsers)
+    tapEl.addEventListener('click', start);
+    imgEl.addEventListener('click', start);
+    window.addEventListener('keydown', (e)=>{
+      if (e.key === 'ArrowRight') showImage(idx + 1);
+      if (e.key === '+') setScale(scale + 0.05);
+      if (e.key === '-') setScale(scale - 0.05);
+      start();
+    });
+  </script>
 </body>
 </html>
