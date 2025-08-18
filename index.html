@@ -92,8 +92,14 @@
       if (started) return; started = true;
       tapEl.classList.add('hide');
 
-      // Prepare camera
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }});
+      // Prepare camera (prefer back camera)
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: 640,
+          height: 480,
+          facingMode: { exact: 'environment' }
+        }
+      });
       videoEl.srcObject = stream;
       await videoEl.play();
 
