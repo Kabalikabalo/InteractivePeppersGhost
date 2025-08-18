@@ -1,24 +1,37 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Earth – Pinch Distance = Zoom (No Drag)</title>
+<title>Earth – Zoom by Thumb–Index Distance (with Readout)</title>
 <style>
   html,body {height:100%}
-  body {margin:0; background:#000; color:#eee; font-family:system-ui, sans-serif}
+  body {margin:0; background:#000; color:#eee; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif}
   #view {width:100vw; height:100vh; display:block; background:#000}
   #cam {display:none}
   #tap {position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000}
-  button {font-size:1rem; padding:.6rem 1rem}
-  .hint {position:fixed; left:12px; bottom:12px; opacity:.8; font-size:14px}
+  button {font-size:1rem; padding:.6rem 1rem; border-radius:.5rem; border:1px solid #444; background:#111; color:#fff}
+  #hud {position:fixed; left:12px; top:12px; background:rgba(0,0,0,.55); padding:10px 12px; border-radius:10px; font-size:14px; line-height:1.35}
+  .bar {width:220px; height:8px; background:#333; border-radius:4px; margin-top:6px; overflow:hidden}
+  .fill {height:100%; width:0%; background:#4caf50}
+  .hint {position:fixed; left:12px; bottom:12px; opacity:.8; font-size:13px}
 </style>
 </head>
 <body>
 <canvas id="view"></canvas>
 <video id="cam" playsinline muted></video>
 <div id="tap"><button id="startBtn">Start Camera</button></div>
-<div class="hint">Thumb–Index distance = zoom • R = reset</div>
+
+<!-- Live distance readout -->
+<div id="hud">
+  <div><strong>Thumb–Index distance</strong></div>
+  <div>Current d: <span id="dVal">—</span></div>
+  <div>Observed range: <span id="minVal">—</span> … <span id="maxVal">—</span></div>
+  <div>Normalized t (0..1): <span id="tVal">—</span></div>
+  <div class="bar"><div id="barFill" class="fill"></div></div>
+</div>
+
+<div class="hint">Closer fingers ⇒ smaller • Farther ⇒ bigger • R = reset</div>
 
 <script type="module">
 import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
@@ -29,25 +42,32 @@ const cam = document.getElementById('cam');
 const overlay = document.getElementById('tap');
 const btn = document.getElementById('startBtn');
 
+// HUD elements
+const dOut   = document.getElementById('dVal');
+const minOut = document.getElementById('minVal');
+const maxOut = document.getElementById('maxVal');
+const tOut   = document.getElementById('tVal');
+const bar    = document.getElementById('barFill');
+
 // 🌍 Earth image
 const img = new Image();
 img.crossOrigin = "anonymous";
 img.src = "https://upload.wikimedia.org/wikipedia/commons/9/97/The_Earth_seen_from_Apollo_17.jpg";
 await img.decode();
 
-// --- State (center stays fixed) ---
-let cx = 0, cy = 0;           // canvas center
-let scale = 0.8, targetScale = 0.8;
+// --- State (center fixed; only scale changes) ---
+let cx=0, cy=0;
+let scale=0.8, targetScale=0.8;
 const EASE = 0.25;
 
-// Map pinch distance -> scale
-// d ≈ 0.00 (touching) … ~0.20 (far apart) depending on camera framing
-const MIN_SCALE = 0.05;       // size when fingers are touching
-const MAX_SCALE = 2;        // size when fingers are far apart
-const DIST_MIN  = 0.00;       // distance mapped to MIN_SCALE
-const DIST_MAX  = 2.0;       // distance mapped to MAX_SCALE (tweak for your setup)
+// distance→scale mapping
+const MIN_SCALE = 0.15;
+const MAX_SCALE = 2.8;
+let DIST_MIN = 0.01;   // “touching” (we’ll keep it at 0)
+let DIST_MAX = 0.20;   // typical max spread; tweak if needed
 
 let lastVideoTime = -1;
+let minD = Infinity, maxD = 0;
 
 // --- Resize ---
 function resize(){
@@ -64,7 +84,10 @@ const files = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm
 const hands = await HandLandmarker.createFromOptions(files, {
   baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" },
   runningMode:"VIDEO",
-  numHands:1
+  numHands:1,
+  minHandDetectionConfidence:0.5,
+  minHandPresenceConfidence:0.5,
+  minTrackingConfidence:0.5
 });
 
 // --- Camera ---
@@ -84,14 +107,14 @@ function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
 function loop(){
   requestAnimationFrame(loop);
 
-  // black bg
+  // background
   ctx.fillStyle = "#000";
   ctx.fillRect(0,0,canvas.width,canvas.height);
 
-  // ease scale
+  // smooth scaling
   scale += (targetScale - scale) * EASE;
 
-  // draw earth centered
+  // draw Earth centered
   ctx.save();
   ctx.translate(cx, cy);
   ctx.scale(scale, scale);
@@ -99,35 +122,52 @@ function loop(){
   ctx.drawImage(img, -img.width/2, -img.height/2);
   ctx.restore();
 
-  // run hand tracking once per video frame
   if (!cam.videoWidth) return;
   const vt = cam.currentTime;
   if (vt === lastVideoTime) return;
   lastVideoTime = vt;
 
   const res = hands.detectForVideo(cam, performance.now());
-  if (!res?.landmarks?.length) return;
+  if (!res?.landmarks?.length) {
+    dOut.textContent = '—';
+    tOut.textContent = '—';
+    return;
+  }
 
-  // distance between index tip (8) and thumb tip (4)
   const lm = res.landmarks[0];
-  const d = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+    let d = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y); // thumb–index distance (normalized)
+    // Round distance to nearest 0.005
+    d = Math.round(d / 0.005) * 0.005;
 
-  // map distance -> target scale, linearly
+  // track observed range for your setup
+  minD = Math.min(minD, d);
+  maxD = Math.max(maxD, d);
+
+  // map to 0..1, then to scale
   const t = clamp((d - DIST_MIN) / (DIST_MAX - DIST_MIN), 0, 1);
   targetScale = MIN_SCALE + t * (MAX_SCALE - MIN_SCALE);
+
+  // update HUD
+  dOut.textContent   = d.toFixed(3);
+  minOut.textContent = (isFinite(minD) ? minD.toFixed(3) : '—');
+  maxOut.textContent = (maxD > 0 ? maxD.toFixed(3) : '—');
+  tOut.textContent   = t.toFixed(2);
+  bar.style.width    = `${(t*100).toFixed(0)}%`;
 }
 
-// --- Reset ---
+// --- Reset key ---
 window.addEventListener('keydown', e=>{
   if (e.key.toLowerCase() === 'r') {
     targetScale = 0.8;
+    // Reset observed range (optional)
+    minD = Infinity; maxD = 0;
   }
 });
 
 // --- Go ---
 btn.addEventListener('click', async ()=>{
   try { await startCam(); overlay.style.display='none'; }
-  catch(e){ alert('Camera failed: '+e.message); console.error(e); }
+  catch(e){ alert('Camera failed: ' + e.message); console.error(e); }
 });
 </script>
 </body>
