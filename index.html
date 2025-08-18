@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hand-gesture Image Control (MVP)</title>
+  <style>
+    html, body { height:100%; }
+    body { margin:0; background:#000; color:#eee; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    #view { width:100vw; height:100vh; display:block; background:#000; }
+    #cam { display:none; } /* hidden video, only for inference */
+    #tapToStart { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; color:#fff; }
+    #tapToStart.hidden { display:none; }
+    button { font-size:1rem; padding:.6rem 1rem; border-radius:.5rem; border:1px solid #444; background:#111; color:#fff; }
+  </style>
+</head>
+<body>
+  <canvas id="view" width="800" height="600"></canvas>
+  <video id="cam" playsinline muted></video>
+  <div id="tapToStart"><button id="startBtn">Tap to Start Camera</button></div>
+
+  <!-- Load as an ES module -->
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+    const view = document.getElementById('view');
+    const ctx  = view.getContext('2d', { alpha:false });
+    const cam  = document.getElementById('cam');
+    const overlay = document.getElementById('tapToStart');
+    const startBtn = document.getElementById('startBtn');
+
+    // Load a public image (Unsplash)
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=1200";
+    await img.decode();
+
+    // Image transform state
+    let tx = view.width/2, ty = view.height/2, scale = 1;
+    let targetTx = tx, targetTy = ty, targetScale = 1;
+
+    const MIN_SCALE=0.4, MAX_SCALE=5;
+    const lerp=(a,b,t)=>a+(b-a)*t, EASE=0.25;
+
+    // Init MediaPipe Tasks Vision
+    const filesetResolver = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+    );
+    const handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+      },
+      runningMode: "VIDEO",
+      numHands: 1,
+      minHandDetectionConfidence: 0.6,
+      minHandPresenceConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+
+    let lastVideoTime=-1;
+    const PINCH_THRESH=0.05;
+
+    async function startCamera(){
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video:{ facingMode:{ ideal:"environment" }, width:{ ideal:640 }, height:{ ideal:480 }, frameRate:{ ideal:30, max:30 } },
+        audio:false
+      });
+      cam.srcObject=stream; await cam.play();
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+      loop();
+    }
+
+    function resizeCanvas(){
+      const dpr=Math.min(window.devicePixelRatio||1,2);
+      const rect = view.getBoundingClientRect();
+      view.width = Math.floor(rect.width*dpr);
+      view.height = Math.floor(rect.height*dpr);
+      // keep image centered after resize
+      targetTx = tx = view.width/2;
+      targetTy = ty = view.height/2;
+    }
+
+    function mapToCanvas(nx,ny){
+      // landmarks are normalized [0..1]; map to current canvas size
+      return { x: nx*view.width, y: ny*view.height };
+    }
+
+    function distance(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+    function loop(){
+      requestAnimationFrame(loop);
+
+      // black background
+      ctx.fillStyle="#000";
+      ctx.fillRect(0,0,view.width,view.height);
+
+      // ease transforms
+      tx=lerp(tx,targetTx,EASE);
+      ty=lerp(ty,targetTy,EASE);
+      scale=lerp(scale,targetScale,EASE);
+
+      // draw image
+      ctx.save();
+      ctx.translate(tx,ty);
+      ctx.scale(scale,scale);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(img, -img.width/2, -img.height/2);
+      ctx.restore();
+
+      if(!cam.videoWidth) return;
+      const vt=cam.currentTime;
+      if(vt===lastVideoTime) return;
+      lastVideoTime=vt;
+
+      const results = handLandmarker.detectForVideo(cam, performance.now());
+      if(!results || !results.landmarks || results.landmarks.length===0) return;
+
+      const hand = results.landmarks[0];
+      const idx={x:hand[8].x, y:hand[8].y};
+      const th ={x:hand[4].x, y:hand[4].y};
+      const pinch = Math.hypot(idx.x - th.x, idx.y - th.y);
+      const {x:ix, y:iy} = mapToCanvas(idx.x, idx.y);
+
+      if(pinch < PINCH_THRESH){
+        targetScale = Math.min(MAX_SCALE, targetScale*1.015);
+        targetTx = lerp(targetTx, ix, 0.35);
+        targetTy = lerp(targetTy, iy, 0.35);
+      } else {
+        targetTx = lerp(targetTx, ix, 0.12);
+        targetTy = lerp(targetTy, iy, 0.12);
+        targetScale = Math.max(MIN_SCALE, targetScale*0.999);
+      }
+
+      // simple bounds
+      const halfW = (img.width*scale)/2;
+      const halfH = (img.height*scale)/2;
+      targetTx = Math.min(view.width - halfW, Math.max(halfW, targetTx));
+      targetTy = Math.min(view.height - halfH, Math.max(halfH, targetTy));
+    }
+
+    startBtn.addEventListener('click', async () => {
+      try {
+        await startCamera();
+        overlay.classList.add('hidden');
+      } catch (err) {
+        console.error(err);
+        alert('Camera start failed: ' + err.message);
+      }
+    });
+  </script>
+</body>
+</html>
