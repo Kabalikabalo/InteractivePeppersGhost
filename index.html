@@ -1,124 +1,206 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>Hand? YES / NO</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  html,body { height:100%; margin:0; background:#000; overflow:hidden; }
-  #status {
-    position:fixed; inset:0; display:grid; place-items:center;
-    font:900 clamp(48px, 20vw, 200px)/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    letter-spacing:.02em; color:#f33; user-select:none;
-  }
-  #status.yes { color:#3f6; }
-  #start { position:fixed; inset:0; display:grid; place-items:center;
-    color:#bbb; font:600 14px system-ui; cursor:pointer; }
-  #start.hide { display:none; }
-  video#cam { display:none; }
-</style>
+  <meta charset="utf-8" />
+  <title>Gesture Gallery (GestureRecognizer + Drag)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; background: #000; overflow: hidden; }
+    /* Only the image is visible */
+    #ghost {
+      position: absolute; inset: 0; margin: auto;
+      max-width: 90vw; max-height: 90vh; object-fit: contain;
+      transform: translate(0px, 0px) scale(1) translateZ(0);
+      transition: transform 0.12s ease;
+      user-select: none; pointer-events: none;
+      filter: drop-shadow(0 0 30px rgba(0,0,0,0.6));
+      transform-origin: center center;
+    }
+    /* Hidden video for the recognizer */
+    #cam { display: none; }
+    /* One-tap starter (required by some browsers for cam permissions) */
+    #tap {
+      position: absolute; inset: 0; display: grid; place-items: center;
+      color: #888; font: 600 14px system-ui; background: transparent; cursor: pointer;
+    }
+    #tap.hide { display: none; }
+  </style>
 </head>
 <body>
-  <div id="status" aria-live="polite">NO</div>
-  <div id="start">tap/click to start</div>
+  <img id="ghost" alt="image" />
   <video id="cam" autoplay playsinline muted></video>
+  <div id="tap">tap/click to start camera</div>
 
-<script type="module">
-  import { HandLandmarker, FilesetResolver }
-    from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+  <!-- MediaPipe Tasks Vision (GestureRecognizer) -->
+  <script type="module">
+    import {
+      GestureRecognizer,
+      FilesetResolver
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-  const statusEl = document.getElementById('status');
-  const startEl  = document.getElementById('start');
-  const cam      = document.getElementById('cam');
+    // Public images that read well on black
+    const IMAGES = [
+      "https://upload.wikimedia.org/wikipedia/commons/9/97/The_Earth_seen_from_Apollo_17.jpg",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/NGC2207%2BIC2163.jpg/640px-NGC2207%2BIC2163.jpg",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f5/Venus_colour.png/640px-Venus_colour.png",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5a/NGC6543.jpg/640px-NGC6543.jpg",
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/Crab_Nebula.jpg/640px-Crab_Nebula.jpg"
+    ];
 
-  // simple hysteresis so the text doesn't flicker
-  const HOLD_MS = 300;
-  let lastSeenAt = 0;
-  let showingYes = false;
+    const imgEl   = document.getElementById('ghost');
+    const videoEl = document.getElementById('cam');
+    const tapEl   = document.getElementById('tap');
 
-  function setStatus(hasHand){
-    const now = performance.now();
-    if (hasHand) lastSeenAt = now;
-    const shouldShowYes = hasHand || (now - lastSeenAt < HOLD_MS);
-    if (shouldShowYes !== showingYes) {
-      showingYes = shouldShowYes;
-      statusEl.textContent = showingYes ? 'YES' : 'NO';
-      statusEl.classList.toggle('yes', showingYes);
+    let idx = 0;
+
+    // --- View transform state (scale + pan) ---
+    let scale = 1;
+    let tx = 0, ty = 0; // current translate in px
+    const SCALE_MIN = 0.4, SCALE_MAX = 2.8, SCALE_STEP = 0.02;
+    const DRAG_SENSITIVITY = 1.2; // tune to taste
+
+    function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+    function applyTransform(){
+      imgEl.style.transform = `translate(${tx}px, ${ty}px) scale(${scale}) translateZ(0)`;
     }
-  }
+    function setScale(s){ scale = clamp(s, SCALE_MIN, SCALE_MAX); applyTransform(); }
 
-  const TARGET_FPS = 15;                   // throttle inference for mobile
-  const INTERVAL   = 1000 / TARGET_FPS;
-  let lastInfer = 0, started = false, pageHidden = false;
-
-  document.addEventListener('visibilitychange', ()=>{ pageHidden = document.hidden; });
-
-  async function start(){
-    if (started) return; started = true; startEl.classList.add('hide');
-
-    // small camera feed (hidden)
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video:{
-        width:{ideal:320, max:320},
-        height:{ideal:240, max:240},
-        frameRate:{ideal:15, max:15},
-        facingMode:{ideal:'user'} // try 'environment' if you prefer rear cam
-      }
-    });
-    cam.srcObject = stream; await cam.play();
-
-    // load hand landmark model
-    const fileset = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-    );
-    const handLM = await HandLandmarker.createFromOptions(fileset, {
-      baseOptions:{
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
-      },
-      runningMode: "VIDEO",
-      numHands: 1,
-      minHandDetectionConfidence: 0.35,
-      minHandPresenceConfidence: 0.3,
-      minTrackingConfidence: 0.2
-    });
-
-    // quick re-acquire helper (IMAGE mode once) if tracking drops
-    async function reacquireOnce(){
-      await handLM.setOptions({ runningMode: "IMAGE" });
-      const r = await handLM.detect(cam);
-      await handLM.setOptions({ runningMode: "VIDEO" });
-      return r;
+    // Optional: keep image roughly inside viewport (soft clamp)
+    function clampPan(){
+      // image box (approx) after scale — we keep generous bounds
+      const pad = 200; // allow some overscroll
+      const maxX = (window.innerWidth/2) + pad;
+      const minX = -maxX;
+      const maxY = (window.innerHeight/2) + pad;
+      const minY = -maxY;
+      tx = clamp(tx, minX, maxX);
+      ty = clamp(ty, minY, maxY);
     }
 
-    let misses = 0;
+    // preload with onerror-skip
+    function showImage(i, depth=0){
+      if (depth > IMAGES.length) return; // stop if all fail
+      const safe = ((i % IMAGES.length) + IMAGES.length) % IMAGES.length;
+      idx = safe;
+      const probe = new Image();
+      probe.onload  = () => { imgEl.src = IMAGES[idx]; };
+      probe.onerror = () => { showImage(idx + 1, depth + 1); }; // skip broken
+      probe.src = IMAGES[idx];
+    }
+    showImage(idx);
+    setScale(1);
 
-    const loop = async ()=>{
-      const now = performance.now();
-      if (!pageHidden && now - lastInfer >= INTERVAL){
-        lastInfer = now;
-        let r = handLM.detectForVideo(cam, now);
+    // Debounce "Thumb_Up" → next image
+    let lastPointAt = 0;
+    const POINT_COOLDOWN_MS = 700;
 
-        if (!r?.landmarks?.length){
-          misses++;
-          if (misses % 6 === 0) r = await reacquireOnce(); // ~400ms cadence
-        } else {
-          misses = 0;
+    // --- Drag tracking (with index fingertip landmark #8) ---
+    let lastDrag = null; // {x, y} in screen px
+
+    function startDragAt(px, py){
+      lastDrag = { x: px, y: py };
+    }
+    function updateDrag(px, py){
+      if (!lastDrag) { startDragAt(px, py); return; }
+      const dx = (px - lastDrag.x) * DRAG_SENSITIVITY;
+      const dy = (py - lastDrag.y) * DRAG_SENSITIVITY;
+      tx += dx; ty += dy;
+      clampPan();
+      applyTransform();
+      lastDrag = { x: px, y: py };
+    }
+    function endDrag(){ lastDrag = null; }
+
+    // Map gesture labels -> actions (plus drag while Pointing_Up)
+    function handleGesture(label, landmarks){
+      if (label === "Open_Palm") {
+        setScale(scale + SCALE_STEP);
+        endDrag();
+      } else if (label === "Closed_Fist") {
+        setScale(scale - SCALE_STEP);
+        endDrag();
+      } else if (label === "Thumb_Up") {
+        const now = performance.now();
+        if (now - lastPointAt > POINT_COOLDOWN_MS) {
+          lastPointAt = now;
+          showImage(idx + 1);
         }
-
-        setStatus(!!r?.landmarks?.length);
+        endDrag();
+      } else if (label === "Pointing_Up") {
+        // Use landmark 8 (index fingertip) from the first detected hand
+        if (landmarks && landmarks.length > 0 && landmarks[0] && landmarks[0][8]) {
+          const tip = landmarks[0][8]; // normalized [0..1] coords in input frame
+          // Convert to screen px (approx: map to viewport)
+          const px = tip.x * window.innerWidth;
+          const py = tip.y * window.innerHeight;
+          updateDrag(px, py);
+        }
+      } else {
+        // any other gesture → stop dragging
+        endDrag();
       }
+    }
+
+    let started = false;
+    async function start(){
+      if (started) return; started = true;
+      tapEl.classList.add('hide');
+
+      // Prepare camera (prefer back camera if available)
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: 640,
+          height: 480,
+          facingMode: { ideal: 'environment' }
+        }
+      });
+      videoEl.srcObject = stream;
+      await videoEl.play();
+
+      // Load WASM core and the gesture model
+      const fileset = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+      const recognizer = await GestureRecognizer.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task"
+        },
+        runningMode: "VIDEO",
+        numHands: 1
+      });
+
+      // Video loop
+      const loop = () => {
+        const now = performance.now();
+        const result = recognizer.recognizeForVideo(videoEl, now);
+        if (result && result.gestures && result.gestures.length > 0) {
+          const top = result.gestures[0][0]; // highest score classification for first hand
+          if (top && top.categoryName && top.score > 0.6) {
+            // Pass landmarks so we can read landmark[8] while Pointing_Up
+            handleGesture(top.categoryName, result.landmarks);
+          } else {
+            endDrag();
+          }
+        } else {
+          endDrag();
+        }
+        requestAnimationFrame(loop);
+      };
       requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
+    }
 
-    // clean up camera on unload
-    window.addEventListener('pagehide', ()=> stream.getTracks().forEach(t=>t.stop()));
-  }
+    // Start on user interaction (required by some browsers)
+    tapEl.addEventListener('click', start);
+    imgEl.addEventListener('click', start);
+    window.addEventListener('keydown', (e)=>{
+      if (e.key === 'ArrowRight') showImage(idx + 1);
+      if (e.key === '+') setScale(scale + 0.05);
+      if (e.key === '-') setScale(scale - 0.05);
+      start();
+    });
 
-  startEl.addEventListener('click', start);
-  window.addEventListener('keydown', start);
-  document.body.addEventListener('click', start);
-</script>
+    // Resize safety: keep image roughly in view when viewport changes
+    window.addEventListener('resize', () => { clampPan(); applyTransform(); });
+  </script>
 </body>
 </html>
