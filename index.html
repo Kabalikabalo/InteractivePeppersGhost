@@ -2,149 +2,140 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Finger X Debug (no mirroring)</title>
+<title>Finger X (mobile-lite)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   html,body{height:100%;margin:0;background:#000;overflow:hidden}
-  #stage{position:absolute;inset:0;display:grid;place-items:center}
-  #earth{max-width:90vw;max-height:90vh;object-fit:contain;filter:drop-shadow(0 0 30px rgba(0,0,0,0.6))}
-  #cam{display:none}
-  #tap{position:absolute;inset:0;display:grid;place-items:center;color:#888;font:600 14px system-ui;background:transparent;cursor:pointer}
-  #tap.hide{display:none}
-
-  /* HUD */
-  #hud{
-    position:fixed;left:12px;bottom:12px;
-    font:12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    color:#cfc;border:1px solid #1a3;background:rgba(0,0,0,.55);
-    border-radius:8px;padding:8px 10px;pointer-events:none;white-space:pre;
-  }
-  #cursor{
-    position:fixed;width:10px;height:10px;border:2px solid #6f6;border-radius:50%;
-    box-shadow:0 0 8px rgba(0,255,120,.7);transform:translate(-50%,-50%);display:none;pointer-events:none;
-  }
-  #bar{
-    position:fixed;left:50%;bottom:56px;transform:translateX(-50%);
-    width:60vw;max-width:720px;height:6px;background:#1a1a1a;border:1px solid #333;border-radius:4px;overflow:hidden;
-  }
+  /* Minimal UI */
+  #tap{position:absolute;inset:0;display:grid;place-items:center;color:#bbb;
+       font:600 14px system-ui;cursor:pointer} #tap.hide{display:none}
+  #hud{position:fixed;left:10px;bottom:10px;font:12px/1.2 ui-monospace,monospace;
+       color:#cfc;background:rgba(0,0,0,.55);border:1px solid #1a3;border-radius:8px;
+       padding:6px 8px;pointer-events:none;white-space:pre}
+  #bar{position:fixed;left:50%;bottom:52px;transform:translateX(-50%);width:70vw;
+       max-width:600px;height:6px;background:#141414;border:1px solid #2a2a2a;border-radius:4px}
   #fill{height:100%;width:0%;background:#5f5}
+  #dot{position:fixed;width:8px;height:8px;border:2px solid #6f6;border-radius:50%;
+       box-shadow:0 0 6px rgba(0,255,120,.7);transform:translate(-50%,-50%);display:none}
+  /* Hidden camera feed */
+  video#cam{display:none}
 </style>
 </head>
 <body>
-  <div id="stage">
-    <!-- Optional: a video to scrub; HUD works even if you remove this -->
-    <video id="earth" playsinline muted preload="auto"
-      src="https://svs.gsfc.nasa.gov/vis/a000000/a003600/a003639/phytoBlue_30fps.mp4"></video>
-  </div>
-
-  <video id="cam" autoplay playsinline muted></video>
-  <div id="tap">tap/click to start camera</div>
-
-  <!-- HUD elements -->
+  <div id="tap">tap/click to start</div>
   <div id="hud">waiting…</div>
-  <div id="cursor"></div>
   <div id="bar"><div id="fill"></div></div>
+  <div id="dot"></div>
+  <video id="cam" autoplay playsinline muted></video>
 
 <script type="module">
   import { HandLandmarker, FilesetResolver }
     from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-  const hud = document.getElementById('hud');
-  const dot = document.getElementById('cursor');
-  const bar = document.getElementById('fill');
-  const cam = document.getElementById('cam');
-  const tap = document.getElementById('tap');
-  const vid = document.getElementById('earth');
+  const tap  = document.getElementById('tap');
+  const hud  = document.getElementById('hud');
+  const fill = document.getElementById('fill');
+  const dot  = document.getElementById('dot');
+  const cam  = document.getElementById('cam');
 
-  // smoothing so values don’t jitter
-  let smX = null, smY = null, alpha = 0.25;
-  const smooth = (x, y) => {
-    smX = (smX==null ? x : smX + alpha*(x-smX));
-    smY = (smY==null ? y : smY + alpha*(y-smY));
-    return { x: smX, y: smY };
-  };
+  // low-jitter smoothing
+  let smX=null, smY=null, ALPHA=0.25;
+  const smooth=(x,y)=>({ x: smX=(smX==null?x:smX+ALPHA*(x-smX)),
+                         y: smY=(smY==null?y:smY+ALPHA*(y-smY)) });
 
-  // optional video scrub
-  let duration = 0;
-  vid.addEventListener('loadedmetadata', ()=> duration = vid.duration || 0);
-
-  function updateHUD(rawX, rawY, mappedX, mappedY, hasHand){
-    const lines = [
-      `hand: ${hasHand ? 'yes' : 'no '}`,
-      `raw   x=${rawX.toFixed(3)}  y=${rawY.toFixed(3)}`,
-      `smooth x=${smX?.toFixed(3) ?? '—'}  y=${smY?.toFixed(3) ?? '—'}`,
-      `mapped x=${mappedX.toFixed(3)}  y=${mappedY.toFixed(3)}`,
-      duration ? `video t=${(mappedX*duration).toFixed(2)}s / ${duration.toFixed(2)}s` : `video: (loading / disabled)`
-    ];
-    hud.textContent = lines.join('\n');
-    bar.style.width = `${Math.max(0, Math.min(1, mappedX))*100}%`;
-  }
-
-  function showDot(px, py){
-    dot.style.display = 'block';
-    dot.style.left = `${px}px`;
-    dot.style.top  = `${py}px`;
-  }
-  function hideDot(){ dot.style.display = 'none'; }
+  // performance knobs
+  const TARGET_FPS = 12;                  // throttled inference rate
+  const INTERVAL   = 1000/TARGET_FPS;
+  let lastInfer = 0;
 
   let started=false, handLM=null;
 
-  async function start(){
-    if (started) return; started=true; tap.classList.add('hide');
+  function updateUI(rawX, rawY, mappedX, mappedY, hasHand){
+    hud.textContent =
+`hand: ${hasHand?'yes':'no '}
+raw   x=${rawX.toFixed(3)}  y=${rawY.toFixed(3)}
+smooth x=${(smX??0).toFixed(3)}  y=${(smY??0).toFixed(3)}
+mapped x=${mappedX.toFixed(3)}  y=${mappedY.toFixed(3)}`;
+    fill.style.width = `${Math.max(0, Math.min(1, mappedX))*100}%`;
+  }
+  function showDot(px,py){ dot.style.display='block'; dot.style.left=`${px}px`; dot.style.top=`${py}px`; }
+  function hideDot(){ dot.style.display='none'; }
 
-    // webcam
+  // Pause compute when tab is hidden
+  let pageHidden=false;
+  document.addEventListener('visibilitychange', ()=>{ pageHidden=document.hidden; });
+
+  async function start(){
+    if (started) return; started = true; tap.classList.add('hide');
+
+    // Ask for a SMALL camera stream
     const stream = await navigator.mediaDevices.getUserMedia({
-      video:{ width:640, height:480, facingMode:{ideal:'environment'} }
+      video:{
+        width: {ideal: 320, max: 320},
+        height:{ideal: 240, max: 240},
+        frameRate:{ideal: 15, max: 15},
+        facingMode:{ideal:'environment'}
+      }
     });
     cam.srcObject = stream; await cam.play();
 
-    // prepare video (don’t autoplay; we scrub it)
-    try { await vid.play(); vid.pause(); } catch(e){ /* ignore autoplay block */ }
-
-    // load hand landmark model
+    // Load WASM + **int8** model (faster than float16)
     const fileset = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
     );
-    handLM = await HandLandmarker.createFromOptions(fileset,{
+    handLM = await HandLandmarker.createFromOptions(fileset, {
       baseOptions:{
-        modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+        modelAssetPath:
+  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/int8/1/hand_landmarker.task"
       },
       runningMode:"VIDEO",
-      numHands:1
+      numHands:1,
+      minHandDetectionConfidence:0.5,
+      minTrackingConfidence:0.3
     });
 
-    // loop: landmark #8 → HUD (and scrub)
+    // Main loop (throttled)
     const loop = ()=>{
       const now = performance.now();
-      const r = handLM.detectForVideo(cam, now);
-
-      if (r?.landmarks?.length){
-        const tip = r.landmarks[0][8];     // index fingertip
-        if (tip){
-          const sm = smooth(tip.x, tip.y);
-          const mappedX = sm.x;            // no mirroring
-          const mappedY = sm.y;
-
-          updateHUD(tip.x, tip.y, mappedX, mappedY, true);
-          showDot(tip.x * innerWidth, tip.y * innerHeight);
-
-          if (duration){
-            vid.pause();
-            vid.currentTime = mappedX * duration;
+      if (!pageHidden && now - lastInfer >= INTERVAL){
+        lastInfer = now;
+        const r = handLM.detectForVideo(cam, now);
+        if (r?.landmarks?.length){
+          const tip = r.landmarks[0][8]; // index fingertip
+          if (tip){
+            const sm = smooth(tip.x, tip.y);
+            const mappedX = sm.x; // no mirroring
+            const mappedY = sm.y;
+            updateUI(tip.x, tip.y, mappedX, mappedY, true);
+            showDot(tip.x * innerWidth, tip.y * innerHeight);
           }
+        } else {
+          hideDot();
+          updateUI(0,0,0,0,false);
         }
-      } else {
-        hideDot();
-        updateHUD(0,0,0,0,false);
       }
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
+
+    // Free camera if user leaves the page for a while
+    window.addEventListener('pagehide', ()=>{
+      stream.getTracks().forEach(t=>t.stop());
+    });
   }
+
+  // Fallback: if ML still feels heavy, allow touch to “fake” x for demos
+  function touchFallback(e){
+    const t = e.touches?.[0] || e;
+    const x = Math.max(0, Math.min(1, t.clientX / innerWidth));
+    smX = x; smY = 0.5; // inject smoothed values
+    updateUI(x, 0.5, x, 0.5, true);
+    showDot(t.clientX, innerHeight*0.5);
+  }
+  // Press & drag anywhere to see the bar move even without the camera
+  document.addEventListener('touchmove', touchFallback, {passive:true});
+  document.addEventListener('mousemove',  touchFallback);
 
   tap.addEventListener('click', start);
   window.addEventListener('keydown', start);
-  document.body.addEventListener('click', start);
-</script>
-</body>
-</html>
+  document.body.addEventListen
