@@ -2,140 +2,123 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Finger X (mobile-lite)</title>
+<title>Hand? YES / NO</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-  html,body{height:100%;margin:0;background:#000;overflow:hidden}
-  /* Minimal UI */
-  #tap{position:absolute;inset:0;display:grid;place-items:center;color:#bbb;
-       font:600 14px system-ui;cursor:pointer} #tap.hide{display:none}
-  #hud{position:fixed;left:10px;bottom:10px;font:12px/1.2 ui-monospace,monospace;
-       color:#cfc;background:rgba(0,0,0,.55);border:1px solid #1a3;border-radius:8px;
-       padding:6px 8px;pointer-events:none;white-space:pre}
-  #bar{position:fixed;left:50%;bottom:52px;transform:translateX(-50%);width:70vw;
-       max-width:600px;height:6px;background:#141414;border:1px solid #2a2a2a;border-radius:4px}
-  #fill{height:100%;width:0%;background:#5f5}
-  #dot{position:fixed;width:8px;height:8px;border:2px solid #6f6;border-radius:50%;
-       box-shadow:0 0 6px rgba(0,255,120,.7);transform:translate(-50%,-50%);display:none}
-  /* Hidden camera feed */
-  video#cam{display:none}
+  html,body { height:100%; margin:0; background:#000; overflow:hidden; }
+  #status {
+    position:fixed; inset:0; display:grid; place-items:center;
+    font:900 clamp(48px, 20vw, 200px)/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    letter-spacing:.02em; color:#f33; user-select:none;
+  }
+  #status.yes { color:#3f6; }
+  #start { position:fixed; inset:0; display:grid; place-items:center;
+    color:#bbb; font:600 14px system-ui; cursor:pointer; }
+  #start.hide { display:none; }
+  video#cam { display:none; }
 </style>
 </head>
 <body>
-  <div id="tap">tap/click to start</div>
-  <div id="hud">waiting…</div>
-  <div id="bar"><div id="fill"></div></div>
-  <div id="dot"></div>
+  <div id="status" aria-live="polite">NO</div>
+  <div id="start">tap/click to start</div>
   <video id="cam" autoplay playsinline muted></video>
 
 <script type="module">
   import { HandLandmarker, FilesetResolver }
     from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
-  const tap  = document.getElementById('tap');
-  const hud  = document.getElementById('hud');
-  const fill = document.getElementById('fill');
-  const dot  = document.getElementById('dot');
-  const cam  = document.getElementById('cam');
+  const statusEl = document.getElementById('status');
+  const startEl  = document.getElementById('start');
+  const cam      = document.getElementById('cam');
 
-  // low-jitter smoothing
-  let smX=null, smY=null, ALPHA=0.25;
-  const smooth=(x,y)=>({ x: smX=(smX==null?x:smX+ALPHA*(x-smX)),
-                         y: smY=(smY==null?y:smY+ALPHA*(y-smY)) });
+  // simple hysteresis so the text doesn't flicker
+  const HOLD_MS = 300;
+  let lastSeenAt = 0;
+  let showingYes = false;
 
-  // performance knobs
-  const TARGET_FPS = 12;                  // throttled inference rate
-  const INTERVAL   = 1000/TARGET_FPS;
-  let lastInfer = 0;
-
-  let started=false, handLM=null;
-
-  function updateUI(rawX, rawY, mappedX, mappedY, hasHand){
-    hud.textContent =
-`hand: ${hasHand?'yes':'no '}
-raw   x=${rawX.toFixed(3)}  y=${rawY.toFixed(3)}
-smooth x=${(smX??0).toFixed(3)}  y=${(smY??0).toFixed(3)}
-mapped x=${mappedX.toFixed(3)}  y=${mappedY.toFixed(3)}`;
-    fill.style.width = `${Math.max(0, Math.min(1, mappedX))*100}%`;
+  function setStatus(hasHand){
+    const now = performance.now();
+    if (hasHand) lastSeenAt = now;
+    const shouldShowYes = hasHand || (now - lastSeenAt < HOLD_MS);
+    if (shouldShowYes !== showingYes) {
+      showingYes = shouldShowYes;
+      statusEl.textContent = showingYes ? 'YES' : 'NO';
+      statusEl.classList.toggle('yes', showingYes);
+    }
   }
-  function showDot(px,py){ dot.style.display='block'; dot.style.left=`${px}px`; dot.style.top=`${py}px`; }
-  function hideDot(){ dot.style.display='none'; }
 
-  // Pause compute when tab is hidden
-  let pageHidden=false;
-  document.addEventListener('visibilitychange', ()=>{ pageHidden=document.hidden; });
+  const TARGET_FPS = 15;                   // throttle inference for mobile
+  const INTERVAL   = 1000 / TARGET_FPS;
+  let lastInfer = 0, started = false, pageHidden = false;
+
+  document.addEventListener('visibilitychange', ()=>{ pageHidden = document.hidden; });
 
   async function start(){
-    if (started) return; started = true; tap.classList.add('hide');
+    if (started) return; started = true; startEl.classList.add('hide');
 
-    // Ask for a SMALL camera stream
+    // small camera feed (hidden)
     const stream = await navigator.mediaDevices.getUserMedia({
       video:{
-        width: {ideal: 320, max: 320},
-        height:{ideal: 240, max: 240},
-        frameRate:{ideal: 15, max: 15},
-        facingMode:{ideal:'environment'}
+        width:{ideal:320, max:320},
+        height:{ideal:240, max:240},
+        frameRate:{ideal:15, max:15},
+        facingMode:{ideal:'user'} // try 'environment' if you prefer rear cam
       }
     });
     cam.srcObject = stream; await cam.play();
 
-    // Load WASM + **int8** model (faster than float16)
+    // load hand landmark model
     const fileset = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
     );
-    handLM = await HandLandmarker.createFromOptions(fileset, {
+    const handLM = await HandLandmarker.createFromOptions(fileset, {
       baseOptions:{
         modelAssetPath:
-  "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/int8/1/hand_landmarker.task"
+          "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
       },
-      runningMode:"VIDEO",
-      numHands:1,
-      minHandDetectionConfidence:0.5,
-      minTrackingConfidence:0.3
+      runningMode: "VIDEO",
+      numHands: 1,
+      minHandDetectionConfidence: 0.35,
+      minHandPresenceConfidence: 0.3,
+      minTrackingConfidence: 0.2
     });
 
-    // Main loop (throttled)
-    const loop = ()=>{
+    // quick re-acquire helper (IMAGE mode once) if tracking drops
+    async function reacquireOnce(){
+      await handLM.setOptions({ runningMode: "IMAGE" });
+      const r = await handLM.detect(cam);
+      await handLM.setOptions({ runningMode: "VIDEO" });
+      return r;
+    }
+
+    let misses = 0;
+
+    const loop = async ()=>{
       const now = performance.now();
       if (!pageHidden && now - lastInfer >= INTERVAL){
         lastInfer = now;
-        const r = handLM.detectForVideo(cam, now);
-        if (r?.landmarks?.length){
-          const tip = r.landmarks[0][8]; // index fingertip
-          if (tip){
-            const sm = smooth(tip.x, tip.y);
-            const mappedX = sm.x; // no mirroring
-            const mappedY = sm.y;
-            updateUI(tip.x, tip.y, mappedX, mappedY, true);
-            showDot(tip.x * innerWidth, tip.y * innerHeight);
-          }
+        let r = handLM.detectForVideo(cam, now);
+
+        if (!r?.landmarks?.length){
+          misses++;
+          if (misses % 6 === 0) r = await reacquireOnce(); // ~400ms cadence
         } else {
-          hideDot();
-          updateUI(0,0,0,0,false);
+          misses = 0;
         }
+
+        setStatus(!!r?.landmarks?.length);
       }
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
 
-    // Free camera if user leaves the page for a while
-    window.addEventListener('pagehide', ()=>{
-      stream.getTracks().forEach(t=>t.stop());
-    });
+    // clean up camera on unload
+    window.addEventListener('pagehide', ()=> stream.getTracks().forEach(t=>t.stop()));
   }
 
-  // Fallback: if ML still feels heavy, allow touch to “fake” x for demos
-  function touchFallback(e){
-    const t = e.touches?.[0] || e;
-    const x = Math.max(0, Math.min(1, t.clientX / innerWidth));
-    smX = x; smY = 0.5; // inject smoothed values
-    updateUI(x, 0.5, x, 0.5, true);
-    showDot(t.clientX, innerHeight*0.5);
-  }
-  // Press & drag anywhere to see the bar move even without the camera
-  document.addEventListener('touchmove', touchFallback, {passive:true});
-  document.addEventListener('mousemove',  touchFallback);
-
-  tap.addEventListener('click', start);
+  startEl.addEventListener('click', start);
   window.addEventListener('keydown', start);
-  document.body.addEventListen
+  document.body.addEventListener('click', start);
+</script>
+</body>
+</html>
