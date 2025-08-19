@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Gesture Gallery (GestureRecognizer, Minimal)</title>
+  <title>Gesture Gallery (GestureRecognizer + Drag)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     html, body { height: 100%; margin: 0; background: #000; overflow: hidden; }
@@ -10,8 +10,11 @@
     #ghost {
       position: absolute; inset: 0; margin: auto;
       max-width: 90vw; max-height: 90vh; object-fit: contain;
-      transform: scale(1) translateZ(0); transition: transform 0.12s ease;
-      user-select: none; pointer-events: none; filter: drop-shadow(0 0 30px rgba(0,0,0,0.6));
+      transform: translate(0px, 0px) scale(1) translateZ(0);
+      transition: transform 0.12s ease;
+      user-select: none; pointer-events: none;
+      filter: drop-shadow(0 0 30px rgba(0,0,0,0.6));
+      transform-origin: center center;
     }
     /* Hidden video for the recognizer */
     #cam { display: none; }
@@ -28,7 +31,7 @@
   <video id="cam" autoplay playsinline muted></video>
   <div id="tap">tap/click to start camera</div>
 
-  <!-- Use MediaPipe Tasks Vision (GestureRecognizer) -->
+  <!-- MediaPipe Tasks Vision (GestureRecognizer) -->
   <script type="module">
     import {
       GestureRecognizer,
@@ -44,16 +47,35 @@
       "https://upload.wikimedia.org/wikipedia/commons/thumb/0/00/Crab_Nebula.jpg/640px-Crab_Nebula.jpg"
     ];
 
-    const imgEl  = document.getElementById('ghost');
+    const imgEl   = document.getElementById('ghost');
     const videoEl = document.getElementById('cam');
     const tapEl   = document.getElementById('tap');
 
     let idx = 0;
+
+    // --- View transform state (scale + pan) ---
     let scale = 1;
+    let tx = 0, ty = 0; // current translate in px
     const SCALE_MIN = 0.4, SCALE_MAX = 2.8, SCALE_STEP = 0.02;
+    const DRAG_SENSITIVITY = 1.2; // tune to taste
 
     function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
-    function setScale(s){ scale = clamp(s, SCALE_MIN, SCALE_MAX); imgEl.style.transform = `scale(${scale}) translateZ(0)`; }
+    function applyTransform(){
+      imgEl.style.transform = `translate(${tx}px, ${ty}px) scale(${scale}) translateZ(0)`;
+    }
+    function setScale(s){ scale = clamp(s, SCALE_MIN, SCALE_MAX); applyTransform(); }
+
+    // Optional: keep image roughly inside viewport (soft clamp)
+    function clampPan(){
+      // image box (approx) after scale — we keep generous bounds
+      const pad = 200; // allow some overscroll
+      const maxX = (window.innerWidth/2) + pad;
+      const minX = -maxX;
+      const maxY = (window.innerHeight/2) + pad;
+      const minY = -maxY;
+      tx = clamp(tx, minX, maxX);
+      ty = clamp(ty, minY, maxY);
+    }
 
     // preload with onerror-skip
     function showImage(i, depth=0){
@@ -68,22 +90,54 @@
     showImage(idx);
     setScale(1);
 
-    // Debounce "Pointing_Up" → next image
+    // Debounce "Thumb_Up" → next image
     let lastPointAt = 0;
     const POINT_COOLDOWN_MS = 700;
 
-    // Map gesture labels -> actions
-    function handleGesture(label){
+    // --- Drag tracking (with index fingertip landmark #8) ---
+    let lastDrag = null; // {x, y} in screen px
+
+    function startDragAt(px, py){
+      lastDrag = { x: px, y: py };
+    }
+    function updateDrag(px, py){
+      if (!lastDrag) { startDragAt(px, py); return; }
+      const dx = (px - lastDrag.x) * DRAG_SENSITIVITY;
+      const dy = (py - lastDrag.y) * DRAG_SENSITIVITY;
+      tx += dx; ty += dy;
+      clampPan();
+      applyTransform();
+      lastDrag = { x: px, y: py };
+    }
+    function endDrag(){ lastDrag = null; }
+
+    // Map gesture labels -> actions (plus drag while Pointing_Up)
+    function handleGesture(label, landmarks){
       if (label === "Open_Palm") {
         setScale(scale + SCALE_STEP);
+        endDrag();
       } else if (label === "Closed_Fist") {
         setScale(scale - SCALE_STEP);
+        endDrag();
       } else if (label === "Thumb_Up") {
         const now = performance.now();
         if (now - lastPointAt > POINT_COOLDOWN_MS) {
           lastPointAt = now;
           showImage(idx + 1);
         }
+        endDrag();
+      } else if (label === "Pointing_Up") {
+        // Use landmark 8 (index fingertip) from the first detected hand
+        if (landmarks && landmarks.length > 0 && landmarks[0] && landmarks[0][8]) {
+          const tip = landmarks[0][8]; // normalized [0..1] coords in input frame
+          // Convert to screen px (approx: map to viewport)
+          const px = tip.x * window.innerWidth;
+          const py = tip.y * window.innerHeight;
+          updateDrag(px, py);
+        }
+      } else {
+        // any other gesture → stop dragging
+        endDrag();
       }
     }
 
@@ -92,12 +146,12 @@
       if (started) return; started = true;
       tapEl.classList.add('hide');
 
-      // Prepare camera (prefer back camera)
+      // Prepare camera (prefer back camera if available)
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: 640,
           height: 480,
-          facingMode: { exact: 'environment' }
+          facingMode: { ideal: 'environment' }
         }
       });
       videoEl.srcObject = stream;
@@ -109,7 +163,6 @@
       );
       const recognizer = await GestureRecognizer.createFromOptions(fileset, {
         baseOptions: {
-          // Official hosted model (float16) from Google
           modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task"
         },
         runningMode: "VIDEO",
@@ -120,12 +173,16 @@
       const loop = () => {
         const now = performance.now();
         const result = recognizer.recognizeForVideo(videoEl, now);
-        // result.gestures: Array per hand, with classification list
         if (result && result.gestures && result.gestures.length > 0) {
           const top = result.gestures[0][0]; // highest score classification for first hand
           if (top && top.categoryName && top.score > 0.6) {
-            handleGesture(top.categoryName);
+            // Pass landmarks so we can read landmark[8] while Pointing_Up
+            handleGesture(top.categoryName, result.landmarks);
+          } else {
+            endDrag();
           }
+        } else {
+          endDrag();
         }
         requestAnimationFrame(loop);
       };
@@ -141,6 +198,9 @@
       if (e.key === '-') setScale(scale - 0.05);
       start();
     });
+
+    // Resize safety: keep image roughly in view when viewport changes
+    window.addEventListener('resize', () => { clampPan(); applyTransform(); });
   </script>
 </body>
 </html>
