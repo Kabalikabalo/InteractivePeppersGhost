@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Realistic Holographic Hand</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: white;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        #videoElement {
+            display: none;
+        }
+
+        #canvasElement {
+            background-color: #000;
+        }
+
+        .status {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #444;
+            font-size: 12px;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <video id="videoElement" autoplay muted playsinline></video>
+    <canvas id="canvasElement" width="1280" height="720"></canvas>
+    <div class="status" id="status">Initializing...</div>
+
+    <script>
+        class RealisticHolographicHand {
+            constructor() {
+                this.videoElement = document.getElementById('videoElement');
+                this.canvasElement = document.getElementById('canvasElement');
+                this.canvasCtx = this.canvasElement.getContext('2d');
+                this.status = document.getElementById('status');
+                
+                this.glowIntensity = 0;
+                this.flickerTime = 0;
+                this.baseHandSize = 0; // To track hand distance
+                
+                this.initializeCamera();
+                this.initializeHandTracking();
+                this.startHologramEffects();
+            }
+
+            async initializeCamera() {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            width: 1280,
+                            height: 720,
+                            facingMode: 'user'
+                        }
+                    });
+                    
+                    this.videoElement.srcObject = stream;
+                    this.status.textContent = 'Camera ready';
+                } catch (error) {
+                    console.error('Error accessing camera:', error);
+                    this.status.textContent = 'Camera error';
+                }
+            }
+
+            initializeHandTracking() {
+                this.hands = new Hands({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                    }
+                });
+
+                this.hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.7,
+                    minTrackingConfidence: 0.7
+                });
+
+                this.hands.onResults((results) => {
+                    this.onResults(results);
+                });
+
+                this.camera = new Camera(this.videoElement, {
+                    onFrame: async () => {
+                        await this.hands.send({ image: this.videoElement });
+                    },
+                    width: 1280,
+                    height: 720
+                });
+
+                this.camera.start().then(() => {
+                    this.status.textContent = 'Hologram active';
+                });
+            }
+
+            startHologramEffects() {
+                setInterval(() => {
+                    this.glowIntensity = (Math.sin(Date.now() * 0.01) + 1) / 2;
+                    this.flickerTime += 0.1;
+                }, 16);
+            }
+
+            // Calculate hand size/distance scale factor
+            calculateHandScale(landmarks) {
+                const width = this.canvasElement.width;
+                const height = this.canvasElement.height;
+                
+                // Calculate distance between wrist and middle finger tip
+                const wrist = landmarks[0];
+                const middleTip = landmarks[12];
+                
+                const handLength = Math.sqrt(
+                    Math.pow((middleTip.x - wrist.x) * width, 2) + 
+                    Math.pow((middleTip.y - wrist.y) * height, 2)
+                );
+                
+                // Set base size on first detection
+                if (this.baseHandSize === 0) {
+                    this.baseHandSize = handLength;
+                }
+                
+                // Return scale factor (1.0 = normal size, <1.0 = far away, >1.0 = close)
+                return handLength / this.baseHandSize;
+            }
+
+            onResults(results) {
+                // Clear canvas - pure black
+                this.canvasCtx.fillStyle = '#000';
+                this.canvasCtx.fillRect(0, 0, this.canvasElement.width, this.canvasElement.height);
+
+                // Add subtle background grid
+                this.drawHolographicBackground();
+
+                this.canvasCtx.save();
+                
+                // Mirror effect
+                this.canvasCtx.scale(-1, 1);
+                this.canvasCtx.translate(-this.canvasElement.width, 0);
+
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    results.multiHandLandmarks.forEach((landmarks) => {
+                        this.renderHolographicHand(landmarks);
+                    });
+                    this.status.textContent = 'Hologram detected';
+                } else {
+                    this.status.textContent = 'Show hand';
+                }
+
+                this.canvasCtx.restore();
+
+                // Add subtle interference
+                this.drawHolographicOverlay();
+            }
+
+            drawHolographicBackground() {
+                // Subtle static grid pattern
+                this.canvasCtx.strokeStyle = `rgba(0, 100, 255, ${0.02 + this.glowIntensity * 0.02})`;
+                this.canvasCtx.lineWidth = 1;
+
+                const gridSize = 100;
+                for (let x = 0; x < this.canvasElement.width; x += gridSize) {
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.moveTo(x, 0);
+                    this.canvasCtx.lineTo(x, this.canvasElement.height);
+                    this.canvasCtx.stroke();
+                }
+
+                for (let y = 0; y < this.canvasElement.height; y += gridSize) {
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.moveTo(0, y);
+                    this.canvasCtx.lineTo(this.canvasElement.width, y);
+                    this.canvasCtx.stroke();
+                }
+            }
+
+            drawHolographicOverlay() {
+                // Random interference only
+                if (Math.random() > 0.98) {
+                    this.canvasCtx.fillStyle = `rgba(0, 200, 255, ${0.05 + Math.random() * 0.05})`;
+                    const x = Math.random() * this.canvasElement.width;
+                    const y = Math.random() * this.canvasElement.height;
+                    this.canvasCtx.fillRect(x, y, Math.random() * 50, Math.random() * 10);
+                }
+            }
+
+            renderHolographicHand(landmarks) {
+                const width = this.canvasElement.width;
+                const height = this.canvasElement.height;
+
+                // Calculate hand scale based on distance
+                const handScale = this.calculateHandScale(landmarks);
+
+                // Convert landmarks to screen coordinates
+                const points = landmarks.map(landmark => ({
+                    x: landmark.x * width,
+                    y: landmark.y * height,
+                    z: landmark.z || 0
+                }));
+
+                // Calculate dynamic colors with glow
+                const baseIntensity = 0.7 + this.glowIntensity * 0.3;
+                const flickerIntensity = 0.9 + Math.sin(this.flickerTime * 3) * 0.1;
+                const finalIntensity = baseIntensity * flickerIntensity;
+
+                // Set holographic style with glow
+                this.canvasCtx.shadowColor = `rgba(0, 150, 255, ${finalIntensity})`;
+                this.canvasCtx.shadowBlur = 15 + this.glowIntensity * 10;
+                this.canvasCtx.strokeStyle = `rgba(0, 200, 255, ${finalIntensity})`;
+                this.canvasCtx.lineWidth = 1.5;
+                this.canvasCtx.lineCap = 'round';
+
+                // Draw palm plane connecting fingers with correct sequence
+                this.drawPalmPlane(points, handScale);
+                
+                // Draw finger wireframes with distance-scaled thickness
+                this.drawFingerWireframe(points, [1, 2, 3, 4], 'thumb', handScale);     // Thumb
+                this.drawFingerWireframe(points, [5, 6, 7, 8], 'finger', handScale);    // Index
+                this.drawFingerWireframe(points, [9, 10, 11, 12], 'finger', handScale); // Middle
+                this.drawFingerWireframe(points, [13, 14, 15, 16], 'finger', handScale); // Ring
+                this.drawFingerWireframe(points, [17, 18, 19, 20], 'finger', handScale); // Pinky
+
+                // Reset shadow for next frame
+                this.canvasCtx.shadowBlur = 0;
+            }
+
+            drawPalmPlane(points, handScale) {
+                // Fixed palm connection sequence: 5→1→2, then connect to other fingers
+                const palmShape = [
+                    points[0],  // Wrist
+                    points[5],  // Index base
+                    points[1],  // Thumb base (fixed order)
+                    points[2],  // Thumb joint (connect 1→2 as requested)
+                    points[1],  // Back to thumb base
+                    points[5],  // Back to index base
+                    points[9],  // Middle base
+                    points[13], // Ring base
+                    points[17], // Pinky base
+                    points[0]   // Back to wrist
+                ];
+
+                // Draw front face of palm plane
+                this.canvasCtx.beginPath();
+                palmShape.forEach((point, i) => {
+                    if (i === 0) {
+                        this.canvasCtx.moveTo(point.x, point.y);
+                    } else {
+                        this.canvasCtx.lineTo(point.x, point.y);
+                    }
+                });
+                this.canvasCtx.stroke();
+
+                // Create back face with slight depth offset scaled by distance
+                const depthOffset = 15 * handScale; // Scale depth with hand size
+                const backPalmShape = palmShape.map(point => ({
+                    x: point.x - depthOffset * 0.3,
+                    y: point.y - depthOffset * 0.3
+                }));
+
+                // Draw back face
+                this.canvasCtx.beginPath();
+                backPalmShape.forEach((point, i) => {
+                    if (i === 0) {
+                        this.canvasCtx.moveTo(point.x, point.y);
+                    } else {
+                        this.canvasCtx.lineTo(point.x, point.y);
+                    }
+                });
+                this.canvasCtx.stroke();
+
+                // Connect front and back faces to show depth
+                for (let i = 0; i < palmShape.length - 1; i++) {
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.moveTo(palmShape[i].x, palmShape[i].y);
+                    this.canvasCtx.lineTo(backPalmShape[i].x, backPalmShape[i].y);
+                    this.canvasCtx.stroke();
+                }
+
+                // Draw internal triangulation lines for plane structure
+                const centerPoint = {
+                    x: (points[0].x + points[5].x + points[9].x + points[13].x + points[17].x) / 5,
+                    y: (points[0].y + points[5].y + points[9].y + points[13].y + points[17].y) / 5
+                };
+
+                const backCenterPoint = {
+                    x: centerPoint.x - depthOffset * 0.3,
+                    y: centerPoint.y - depthOffset * 0.3
+                };
+
+                // Draw radiating lines from center
+                [points[0], points[1], points[5], points[9], points[13], points[17]].forEach(point => {
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.moveTo(centerPoint.x, centerPoint.y);
+                    this.canvasCtx.lineTo(point.x, point.y);
+                    this.canvasCtx.stroke();
+                });
+
+                // Connect front and back center points
+                this.canvasCtx.beginPath();
+                this.canvasCtx.moveTo(centerPoint.x, centerPoint.y);
+                this.canvasCtx.lineTo(backCenterPoint.x, backCenterPoint.y);
+                this.canvasCtx.stroke();
+            }
+
+            drawFingerWireframe(points, indices, type, handScale) {
+                const segments = [];
+                
+                // Create finger segments
+                for (let i = 0; i < indices.length - 1; i++) {
+                    const start = points[indices[i]];
+                    const end = points[indices[i + 1]];
+                    segments.push({ start, end });
+                }
+
+                // Calculate finger thickness based on type, segment, and hand scale
+                segments.forEach((segment, segmentIndex) => {
+                    let baseThickness;
+                    if (type === 'thumb') {
+                        baseThickness = 25 - segmentIndex * 4;
+                    } else {
+                        baseThickness = 20 - segmentIndex * 3;
+                    }
+                    
+                    // Scale thickness with hand distance
+                    const scaledThickness = baseThickness * handScale;
+
+                    this.drawFingerSegmentWireframe(segment.start, segment.end, scaledThickness, handScale);
+                });
+
+                // Draw fingertip wireframe with scaled radius
+                const tip = points[indices[indices.length - 1]];
+                const baseRadius = type === 'thumb' ? 12 : 10;
+                const scaledRadius = baseRadius * handScale;
+                this.drawFingertipWireframe(tip, scaledRadius);
+            }
+
+            drawFingerSegmentWireframe(start, end, thickness, handScale) {
+                // Calculate perpendicular vector for width
+                const dx = end.x - start.x;
+                const dy = end.y - start.y;
+                const length = Math.sqrt(dx * dx + dy * dy);
+                
+                if (length === 0) return;
+                
+                const perpX = -dy / length * thickness / 2;
+                const perpY = dx / length * thickness / 2;
+
+                // Create 3D-like effect with depth scaled by hand size
+                const depthOffset = thickness / 4;
+
+                // Top face
+                const topPoints = [
+                    { x: start.x + perpX, y: start.y + perpY - depthOffset },
+                    { x: start.x - perpX, y: start.y - perpY - depthOffset },
+                    { x: end.x - perpX * 0.8, y: end.y - perpY * 0.8 - depthOffset },
+                    { x: end.x + perpX * 0.8, y: end.y + perpY * 0.8 - depthOffset }
+                ];
+
+                // Bottom face
+                const bottomPoints = [
+                    { x: start.x + perpX, y: start.y + perpY + depthOffset },
+                    { x: start.x - perpX, y: start.y - perpY + depthOffset },
+                    { x: end.x - perpX * 0.8, y: end.y - perpY * 0.8 + depthOffset },
+                    { x: end.x + perpX * 0.8, y: end.y + perpY * 0.8 + depthOffset }
+                ];
+
+                // Draw wireframe outline
+                this.canvasCtx.beginPath();
+                topPoints.forEach((point, i) => {
+                    if (i === 0) {
+                        this.canvasCtx.moveTo(point.x, point.y);
+                    } else {
+                        this.canvasCtx.lineTo(point.x, point.y);
+                    }
+                });
+                this.canvasCtx.closePath();
+                this.canvasCtx.stroke();
+
+                this.canvasCtx.beginPath();
+                bottomPoints.forEach((point, i) => {
+                    if (i === 0) {
+                        this.canvasCtx.moveTo(point.x, point.y);
+                    } else {
+                        this.canvasCtx.lineTo(point.x, point.y);
+                    }
+                });
+                this.canvasCtx.closePath();
+                this.canvasCtx.stroke();
+
+                // Connect top and bottom faces
+                for (let i = 0; i < 4; i++) {
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.moveTo(topPoints[i].x, topPoints[i].y);
+                    this.canvasCtx.lineTo(bottomPoints[i].x, bottomPoints[i].y);
+                    this.canvasCtx.stroke();
+                }
+
+                // Add translucent overlay for realism
+                this.drawTranslucentOverlay(topPoints, bottomPoints, thickness);
+
+                // Draw cross-sections with scaled detail
+                const sections = Math.max(2, Math.floor(4 * handScale)); // Fewer sections when far away
+                for (let i = 1; i < sections; i++) {
+                    const t = i / sections;
+                    const sectionThickness = thickness * (1 - t * 0.2);
+                    const sectionPerpX = perpX * (sectionThickness / thickness);
+                    const sectionPerpY = perpY * (sectionThickness / thickness);
+                    
+                    const sectionX = start.x + (end.x - start.x) * t;
+                    const sectionY = start.y + (end.y - start.y) * t;
+
+                    // Draw elliptical cross-section
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.ellipse(
+                        sectionX, sectionY,
+                        Math.abs(sectionPerpX), Math.abs(sectionPerpY),
+                        Math.atan2(dy, dx), 0, 2 * Math.PI
+                    );
+                    this.canvasCtx.stroke();
+                }
+            }
+
+            drawTranslucentOverlay(topPoints, bottomPoints, thickness) {
+                // Save current settings
+                const currentStrokeStyle = this.canvasCtx.strokeStyle;
+                const currentLineWidth = this.canvasCtx.lineWidth;
+                const currentShadowBlur = this.canvasCtx.shadowBlur;
+
+                // Create translucent fill overlay
+                this.canvasCtx.fillStyle = `rgba(0, 180, 255, ${0.1 + this.glowIntensity * 0.05})`;
+                this.canvasCtx.shadowBlur = 0; // Remove shadow for fill
+
+                // Fill top face
+                this.canvasCtx.beginPath();
+                topPoints.forEach((point, i) => {
+                    if (i === 0) {
+                        this.canvasCtx.moveTo(point.x, point.y);
+                    } else {
+                        this.canvasCtx.lineTo(point.x, point.y);
+                    }
+                });
+                this.canvasCtx.closePath();
+                this.canvasCtx.fill();
+
+                // Fill bottom face
+                this.canvasCtx.beginPath();
+                bottomPoints.forEach((point, i) => {
+                    if (i === 0) {
+                        this.canvasCtx.moveTo(point.x, point.y);
+                    } else {
+                        this.canvasCtx.lineTo(point.x, point.y);
+                    }
+                });
+                this.canvasCtx.closePath();
+                this.canvasCtx.fill();
+
+                // Fill side faces for depth
+                for (let i = 0; i < 4; i++) {
+                    const next = (i + 1) % 4;
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.moveTo(topPoints[i].x, topPoints[i].y);
+                    this.canvasCtx.lineTo(topPoints[next].x, topPoints[next].y);
+                    this.canvasCtx.lineTo(bottomPoints[next].x, bottomPoints[next].y);
+                    this.canvasCtx.lineTo(bottomPoints[i].x, bottomPoints[i].y);
+                    this.canvasCtx.closePath();
+                    this.canvasCtx.fill();
+                }
+
+                // Add subtle inner glow lines
+                this.canvasCtx.strokeStyle = `rgba(100, 220, 255, ${0.3 + this.glowIntensity * 0.2})`;
+                this.canvasCtx.lineWidth = 0.5;
+
+                // Inner highlight lines
+                const innerScale = 0.7;
+                const innerTopPoints = topPoints.map(point => ({
+                    x: point.x * innerScale + topPoints[0].x * (1 - innerScale),
+                    y: point.y * innerScale + topPoints[0].y * (1 - innerScale)
+                }));
+
+                this.canvasCtx.beginPath();
+                innerTopPoints.forEach((point, i) => {
+                    if (i === 0) {
+                        this.canvasCtx.moveTo(point.x, point.y);
+                    } else {
+                        this.canvasCtx.lineTo(point.x, point.y);
+                    }
+                });
+                this.canvasCtx.closePath();
+                this.canvasCtx.stroke();
+
+                // Restore settings
+                this.canvasCtx.strokeStyle = currentStrokeStyle;
+                this.canvasCtx.lineWidth = currentLineWidth;
+                this.canvasCtx.shadowBlur = currentShadowBlur;
+            }
+
+            drawFingertipWireframe(tip, radius) {
+                // Draw fingertip as wireframe hemisphere with enhanced detail
+                const rings = Math.max(3, Math.floor(5 * (radius / 12))); // Scale detail with size
+                const segments = 8;
+
+                for (let ring = 0; ring < rings; ring++) {
+                    const ringRadius = radius * Math.sin((ring + 1) * Math.PI / (2 * rings));
+                    const ringY = tip.y - radius * Math.cos((ring + 1) * Math.PI / (2 * rings));
+
+                    // Draw ring
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.arc(tip.x, ringY, ringRadius, 0, 2 * Math.PI);
+                    this.canvasCtx.stroke();
+                }
+
+                // Draw meridian lines
+                for (let seg = 0; seg < segments; seg++) {
+                    const angle = (seg * 2 * Math.PI) / segments;
+                    
+                    this.canvasCtx.beginPath();
+                    this.canvasCtx.moveTo(tip.x, tip.y);
+                    
+                    for (let ring = 1; ring <= rings; ring++) {
+                        const ringRadius = radius * Math.sin(ring * Math.PI / (2 * rings));
+                        const ringY = tip.y - radius * Math.cos(ring * Math.PI / (2 * rings));
+                        const x = tip.x + ringRadius * Math.cos(angle);
+                        const y = ringY;
+                        
+                        this.canvasCtx.lineTo(x, y);
+                    }
+                    this.canvasCtx.stroke();
+                }
+
+                // Add translucent cap
+                this.canvasCtx.fillStyle = `rgba(0, 180, 255, ${0.15 + this.glowIntensity * 0.05})`;
+                this.canvasCtx.beginPath();
+                this.canvasCtx.arc(tip.x, tip.y - radius * 0.3, radius * 0.8, 0, 2 * Math.PI);
+                this.canvasCtx.fill();
+
+                // Draw enhanced fingertip center
+                this.canvasCtx.beginPath();
+                this.canvasCtx.arc(tip.x, tip.y - radius, Math.max(2, radius * 0.2), 0, 2 * Math.PI);
+                this.canvasCtx.stroke();
+            }
+        }
+
+        // Initialize when page loads
+        window.addEventListener('load', () => {
+            new RealisticHolographicHand();
+        });
+    </script>
+</body>
+</html>
