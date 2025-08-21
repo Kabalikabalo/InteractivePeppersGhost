@@ -2,25 +2,30 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Realistic Holographic Hand</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Fixed Mobile Holographic Hand</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
-        body {
+        * {
             margin: 0;
             padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
             background-color: #000;
             color: white;
             font-family: Arial, sans-serif;
+            overflow: hidden;
+            touch-action: none;
+            width: 100vw;
+            height: 100vh;
             display: flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
-            min-height: 100vh;
-            overflow: hidden;
         }
 
         #videoElement {
@@ -29,6 +34,13 @@
 
         #canvasElement {
             background-color: #000;
+            display: block;
+            /* Important: Let canvas fill container while maintaining aspect ratio */
+            max-width: 100vw;
+            max-height: 100vh;
+            width: auto;
+            height: auto;
+            object-fit: contain;
         }
 
         .status {
@@ -39,15 +51,46 @@
             font-size: 12px;
             z-index: 10;
         }
+
+        /* Mobile-specific adjustments */
+        @media (max-width: 768px) {
+            #canvasElement {
+                width: 100vw;
+                height: 100vh;
+                object-fit: cover; /* Fill screen on mobile */
+            }
+            
+            .status {
+                bottom: 10px;
+                left: 10px;
+                font-size: 10px;
+            }
+        }
+
+        /* Portrait orientation */
+        @media (orientation: portrait) {
+            #canvasElement {
+                width: 100vw;
+                height: auto;
+            }
+        }
+
+        /* Landscape orientation */
+        @media (orientation: landscape) {
+            #canvasElement {
+                width: auto;
+                height: 100vh;
+            }
+        }
     </style>
 </head>
 <body>
     <video id="videoElement" autoplay muted playsinline></video>
-    <canvas id="canvasElement" width="1280" height="720"></canvas>
+    <canvas id="canvasElement"></canvas>
     <div class="status" id="status">Initializing...</div>
 
     <script>
-        class RealisticHolographicHand {
+        class FixedMobileHand {
             constructor() {
                 this.videoElement = document.getElementById('videoElement');
                 this.canvasElement = document.getElementById('canvasElement');
@@ -56,19 +99,69 @@
                 
                 this.glowIntensity = 0;
                 this.flickerTime = 0;
-                this.baseHandSize = 0; // To track hand distance
+                this.baseHandSize = 0;
                 
+                this.setupCanvasSize();
                 this.initializeCamera();
                 this.initializeHandTracking();
                 this.startHologramEffects();
+                
+                // Handle orientation changes
+                window.addEventListener('orientationchange', () => {
+                    setTimeout(() => this.setupCanvasSize(), 100);
+                });
+                
+                window.addEventListener('resize', () => {
+                    this.setupCanvasSize();
+                });
+            }
+
+            setupCanvasSize() {
+                // Get device pixel ratio for high-DPI screens
+                const dpr = window.devicePixelRatio || 1;
+                
+                // Get the actual viewport dimensions
+                const viewportWidth = window.innerWidth;
+                const viewportHeight = window.innerHeight;
+                
+                // Calculate canvas dimensions maintaining 16:9 aspect ratio
+                let canvasWidth, canvasHeight;
+                
+                if (viewportWidth / viewportHeight > 16 / 9) {
+                    // Viewport is wider than 16:9, fit to height
+                    canvasHeight = viewportHeight;
+                    canvasWidth = canvasHeight * (16 / 9);
+                } else {
+                    // Viewport is taller than 16:9, fit to width
+                    canvasWidth = viewportWidth;
+                    canvasHeight = canvasWidth * (9 / 16);
+                }
+                
+                // Set the actual canvas resolution (accounting for device pixel ratio)
+                this.canvasElement.width = canvasWidth * dpr;
+                this.canvasElement.height = canvasHeight * dpr;
+                
+                // Set the CSS size (what user sees)
+                this.canvasElement.style.width = canvasWidth + 'px';
+                this.canvasElement.style.height = canvasHeight + 'px';
+                
+                // Scale the context to match device pixel ratio
+                this.canvasCtx.scale(dpr, dpr);
+                
+                // Store logical dimensions for calculations
+                this.logicalWidth = canvasWidth;
+                this.logicalHeight = canvasHeight;
+                
+                console.log(`Canvas setup: ${canvasWidth}x${canvasHeight} (CSS) | ${this.canvasElement.width}x${this.canvasElement.height} (actual) | DPR: ${dpr}`);
             }
 
             async initializeCamera() {
                 try {
+                    // Use logical dimensions for camera
                     const stream = await navigator.mediaDevices.getUserMedia({
                         video: {
-                            width: 1280,
-                            height: 720,
+                            width: { ideal: this.logicalWidth },
+                            height: { ideal: this.logicalHeight },
                             facingMode: 'user'
                         }
                     });
@@ -103,8 +196,8 @@
                     onFrame: async () => {
                         await this.hands.send({ image: this.videoElement });
                     },
-                    width: 1280,
-                    height: 720
+                    width: this.logicalWidth,
+                    height: this.logicalHeight
                 });
 
                 this.camera.start().then(() => {
@@ -119,33 +212,26 @@
                 }, 16);
             }
 
-            // Calculate hand size/distance scale factor
             calculateHandScale(landmarks) {
-                const width = this.canvasElement.width;
-                const height = this.canvasElement.height;
-                
-                // Calculate distance between wrist and middle finger tip
                 const wrist = landmarks[0];
                 const middleTip = landmarks[12];
                 
                 const handLength = Math.sqrt(
-                    Math.pow((middleTip.x - wrist.x) * width, 2) + 
-                    Math.pow((middleTip.y - wrist.y) * height, 2)
+                    Math.pow((middleTip.x - wrist.x) * this.logicalWidth, 2) + 
+                    Math.pow((middleTip.y - wrist.y) * this.logicalHeight, 2)
                 );
                 
-                // Set base size on first detection
                 if (this.baseHandSize === 0) {
                     this.baseHandSize = handLength;
                 }
                 
-                // Return scale factor (1.0 = normal size, <1.0 = far away, >1.0 = close)
                 return handLength / this.baseHandSize;
             }
 
             onResults(results) {
-                // Clear canvas - pure black
+                // Clear canvas using logical dimensions
                 this.canvasCtx.fillStyle = '#000';
-                this.canvasCtx.fillRect(0, 0, this.canvasElement.width, this.canvasElement.height);
+                this.canvasCtx.fillRect(0, 0, this.logicalWidth, this.logicalHeight);
 
                 // Add subtle background grid
                 this.drawHolographicBackground();
@@ -154,7 +240,7 @@
                 
                 // Mirror effect
                 this.canvasCtx.scale(-1, 1);
-                this.canvasCtx.translate(-this.canvasElement.width, 0);
+                this.canvasCtx.translate(-this.logicalWidth, 0);
 
                 if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                     results.multiHandLandmarks.forEach((landmarks) => {
@@ -172,47 +258,41 @@
             }
 
             drawHolographicBackground() {
-                // Subtle static grid pattern
                 this.canvasCtx.strokeStyle = `rgba(0, 100, 255, ${0.02 + this.glowIntensity * 0.02})`;
                 this.canvasCtx.lineWidth = 1;
 
                 const gridSize = 100;
-                for (let x = 0; x < this.canvasElement.width; x += gridSize) {
+                for (let x = 0; x < this.logicalWidth; x += gridSize) {
                     this.canvasCtx.beginPath();
                     this.canvasCtx.moveTo(x, 0);
-                    this.canvasCtx.lineTo(x, this.canvasElement.height);
+                    this.canvasCtx.lineTo(x, this.logicalHeight);
                     this.canvasCtx.stroke();
                 }
 
-                for (let y = 0; y < this.canvasElement.height; y += gridSize) {
+                for (let y = 0; y < this.logicalHeight; y += gridSize) {
                     this.canvasCtx.beginPath();
                     this.canvasCtx.moveTo(0, y);
-                    this.canvasCtx.lineTo(this.canvasElement.width, y);
+                    this.canvasCtx.lineTo(this.logicalWidth, y);
                     this.canvasCtx.stroke();
                 }
             }
 
             drawHolographicOverlay() {
-                // Random interference only
                 if (Math.random() > 0.98) {
                     this.canvasCtx.fillStyle = `rgba(0, 200, 255, ${0.05 + Math.random() * 0.05})`;
-                    const x = Math.random() * this.canvasElement.width;
-                    const y = Math.random() * this.canvasElement.height;
+                    const x = Math.random() * this.logicalWidth;
+                    const y = Math.random() * this.logicalHeight;
                     this.canvasCtx.fillRect(x, y, Math.random() * 50, Math.random() * 10);
                 }
             }
 
             renderHolographicHand(landmarks) {
-                const width = this.canvasElement.width;
-                const height = this.canvasElement.height;
-
-                // Calculate hand scale based on distance
                 const handScale = this.calculateHandScale(landmarks);
 
-                // Convert landmarks to screen coordinates
+                // Use logical dimensions for point calculations
                 const points = landmarks.map(landmark => ({
-                    x: landmark.x * width,
-                    y: landmark.y * height,
+                    x: landmark.x * this.logicalWidth,
+                    y: landmark.y * this.logicalHeight,
                     z: landmark.z || 0
                 }));
 
@@ -232,23 +312,22 @@
                 this.drawPalmPlane(points, handScale);
                 
                 // Draw finger wireframes with distance-scaled thickness
-                this.drawFingerWireframe(points, [1, 2, 3, 4], 'thumb', handScale);     // Thumb
-                this.drawFingerWireframe(points, [5, 6, 7, 8], 'finger', handScale);    // Index
-                this.drawFingerWireframe(points, [9, 10, 11, 12], 'finger', handScale); // Middle
-                this.drawFingerWireframe(points, [13, 14, 15, 16], 'finger', handScale); // Ring
-                this.drawFingerWireframe(points, [17, 18, 19, 20], 'finger', handScale); // Pinky
+                this.drawFingerWireframe(points, [1, 2, 3, 4], 'thumb', handScale);
+                this.drawFingerWireframe(points, [5, 6, 7, 8], 'finger', handScale);
+                this.drawFingerWireframe(points, [9, 10, 11, 12], 'finger', handScale);
+                this.drawFingerWireframe(points, [13, 14, 15, 16], 'finger', handScale);
+                this.drawFingerWireframe(points, [17, 18, 19, 20], 'finger', handScale);
 
-                // Reset shadow for next frame
                 this.canvasCtx.shadowBlur = 0;
             }
 
             drawPalmPlane(points, handScale) {
-                // Fixed palm connection sequence: 5→1→2, then connect to other fingers
+                // Fixed palm connection sequence: 5→1→2
                 const palmShape = [
                     points[0],  // Wrist
                     points[5],  // Index base
-                    points[1],  // Thumb base (fixed order)
-                    points[2],  // Thumb joint (connect 1→2 as requested)
+                    points[1],  // Thumb base
+                    points[2],  // Thumb joint
                     points[1],  // Back to thumb base
                     points[5],  // Back to index base
                     points[9],  // Middle base
@@ -269,7 +348,7 @@
                 this.canvasCtx.stroke();
 
                 // Create back face with slight depth offset scaled by distance
-                const depthOffset = 15 * handScale; // Scale depth with hand size
+                const depthOffset = 15 * handScale;
                 const backPalmShape = palmShape.map(point => ({
                     x: point.x - depthOffset * 0.3,
                     y: point.y - depthOffset * 0.3
@@ -323,14 +402,12 @@
             drawFingerWireframe(points, indices, type, handScale) {
                 const segments = [];
                 
-                // Create finger segments
                 for (let i = 0; i < indices.length - 1; i++) {
                     const start = points[indices[i]];
                     const end = points[indices[i + 1]];
                     segments.push({ start, end });
                 }
 
-                // Calculate finger thickness based on type, segment, and hand scale
                 segments.forEach((segment, segmentIndex) => {
                     let baseThickness;
                     if (type === 'thumb') {
@@ -339,13 +416,10 @@
                         baseThickness = 20 - segmentIndex * 3;
                     }
                     
-                    // Scale thickness with hand distance
                     const scaledThickness = baseThickness * handScale;
-
                     this.drawFingerSegmentWireframe(segment.start, segment.end, scaledThickness, handScale);
                 });
 
-                // Draw fingertip wireframe with scaled radius
                 const tip = points[indices[indices.length - 1]];
                 const baseRadius = type === 'thumb' ? 12 : 10;
                 const scaledRadius = baseRadius * handScale;
@@ -353,7 +427,6 @@
             }
 
             drawFingerSegmentWireframe(start, end, thickness, handScale) {
-                // Calculate perpendicular vector for width
                 const dx = end.x - start.x;
                 const dy = end.y - start.y;
                 const length = Math.sqrt(dx * dx + dy * dy);
@@ -362,11 +435,8 @@
                 
                 const perpX = -dy / length * thickness / 2;
                 const perpY = dx / length * thickness / 2;
-
-                // Create 3D-like effect with depth scaled by hand size
                 const depthOffset = thickness / 4;
 
-                // Top face
                 const topPoints = [
                     { x: start.x + perpX, y: start.y + perpY - depthOffset },
                     { x: start.x - perpX, y: start.y - perpY - depthOffset },
@@ -374,7 +444,6 @@
                     { x: end.x + perpX * 0.8, y: end.y + perpY * 0.8 - depthOffset }
                 ];
 
-                // Bottom face
                 const bottomPoints = [
                     { x: start.x + perpX, y: start.y + perpY + depthOffset },
                     { x: start.x - perpX, y: start.y - perpY + depthOffset },
@@ -382,7 +451,7 @@
                     { x: end.x + perpX * 0.8, y: end.y + perpY * 0.8 + depthOffset }
                 ];
 
-                // Draw wireframe outline
+                // Draw wireframe
                 this.canvasCtx.beginPath();
                 topPoints.forEach((point, i) => {
                     if (i === 0) {
@@ -405,7 +474,6 @@
                 this.canvasCtx.closePath();
                 this.canvasCtx.stroke();
 
-                // Connect top and bottom faces
                 for (let i = 0; i < 4; i++) {
                     this.canvasCtx.beginPath();
                     this.canvasCtx.moveTo(topPoints[i].x, topPoints[i].y);
@@ -413,11 +481,11 @@
                     this.canvasCtx.stroke();
                 }
 
-                // Add translucent overlay for realism
+                // Add translucent overlay
                 this.drawTranslucentOverlay(topPoints, bottomPoints, thickness);
 
-                // Draw cross-sections with scaled detail
-                const sections = Math.max(2, Math.floor(4 * handScale)); // Fewer sections when far away
+                // Draw cross-sections
+                const sections = Math.max(2, Math.floor(4 * handScale));
                 for (let i = 1; i < sections; i++) {
                     const t = i / sections;
                     const sectionThickness = thickness * (1 - t * 0.2);
@@ -427,7 +495,6 @@
                     const sectionX = start.x + (end.x - start.x) * t;
                     const sectionY = start.y + (end.y - start.y) * t;
 
-                    // Draw elliptical cross-section
                     this.canvasCtx.beginPath();
                     this.canvasCtx.ellipse(
                         sectionX, sectionY,
@@ -439,16 +506,14 @@
             }
 
             drawTranslucentOverlay(topPoints, bottomPoints, thickness) {
-                // Save current settings
                 const currentStrokeStyle = this.canvasCtx.strokeStyle;
                 const currentLineWidth = this.canvasCtx.lineWidth;
                 const currentShadowBlur = this.canvasCtx.shadowBlur;
 
-                // Create translucent fill overlay
                 this.canvasCtx.fillStyle = `rgba(0, 180, 255, ${0.1 + this.glowIntensity * 0.05})`;
-                this.canvasCtx.shadowBlur = 0; // Remove shadow for fill
+                this.canvasCtx.shadowBlur = 0;
 
-                // Fill top face
+                // Fill faces
                 this.canvasCtx.beginPath();
                 topPoints.forEach((point, i) => {
                     if (i === 0) {
@@ -460,7 +525,6 @@
                 this.canvasCtx.closePath();
                 this.canvasCtx.fill();
 
-                // Fill bottom face
                 this.canvasCtx.beginPath();
                 bottomPoints.forEach((point, i) => {
                     if (i === 0) {
@@ -472,7 +536,6 @@
                 this.canvasCtx.closePath();
                 this.canvasCtx.fill();
 
-                // Fill side faces for depth
                 for (let i = 0; i < 4; i++) {
                     const next = (i + 1) % 4;
                     this.canvasCtx.beginPath();
@@ -484,11 +547,10 @@
                     this.canvasCtx.fill();
                 }
 
-                // Add subtle inner glow lines
+                // Inner highlight
                 this.canvasCtx.strokeStyle = `rgba(100, 220, 255, ${0.3 + this.glowIntensity * 0.2})`;
                 this.canvasCtx.lineWidth = 0.5;
 
-                // Inner highlight lines
                 const innerScale = 0.7;
                 const innerTopPoints = topPoints.map(point => ({
                     x: point.x * innerScale + topPoints[0].x * (1 - innerScale),
@@ -513,24 +575,20 @@
             }
 
             drawFingertipWireframe(tip, radius) {
-                // Draw fingertip as wireframe hemisphere with enhanced detail
-                const rings = Math.max(3, Math.floor(5 * (radius / 12))); // Scale detail with size
+                const rings = Math.max(3, Math.floor(5 * (radius / 12)));
                 const segments = 8;
 
                 for (let ring = 0; ring < rings; ring++) {
                     const ringRadius = radius * Math.sin((ring + 1) * Math.PI / (2 * rings));
                     const ringY = tip.y - radius * Math.cos((ring + 1) * Math.PI / (2 * rings));
 
-                    // Draw ring
                     this.canvasCtx.beginPath();
                     this.canvasCtx.arc(tip.x, ringY, ringRadius, 0, 2 * Math.PI);
                     this.canvasCtx.stroke();
                 }
 
-                // Draw meridian lines
                 for (let seg = 0; seg < segments; seg++) {
                     const angle = (seg * 2 * Math.PI) / segments;
-                    
                     this.canvasCtx.beginPath();
                     this.canvasCtx.moveTo(tip.x, tip.y);
                     
@@ -538,9 +596,7 @@
                         const ringRadius = radius * Math.sin(ring * Math.PI / (2 * rings));
                         const ringY = tip.y - radius * Math.cos(ring * Math.PI / (2 * rings));
                         const x = tip.x + ringRadius * Math.cos(angle);
-                        const y = ringY;
-                        
-                        this.canvasCtx.lineTo(x, y);
+                        this.canvasCtx.lineTo(x, ringY);
                     }
                     this.canvasCtx.stroke();
                 }
@@ -551,16 +607,14 @@
                 this.canvasCtx.arc(tip.x, tip.y - radius * 0.3, radius * 0.8, 0, 2 * Math.PI);
                 this.canvasCtx.fill();
 
-                // Draw enhanced fingertip center
                 this.canvasCtx.beginPath();
                 this.canvasCtx.arc(tip.x, tip.y - radius, Math.max(2, radius * 0.2), 0, 2 * Math.PI);
                 this.canvasCtx.stroke();
             }
         }
 
-        // Initialize when page loads
         window.addEventListener('load', () => {
-            new RealisticHolographicHand();
+            new FixedMobileHand();
         });
     </script>
 </body>
