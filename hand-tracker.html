@@ -2,13 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
-<title>Mobile Holographic Hand — Performance Optimized (Back Camera)</title>
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1, user-scalable=no"
+/>
+<title>Mobile Holographic Hand — Back Camera (Fixed Assets)</title>
 
-<!-- MediaPipe deps -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<!-- Pin exact versions to avoid moving targets -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.4.1675469240/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.4.1675469240/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
 
 <style>
   * { box-sizing: border-box; margin:0; padding:0; }
@@ -17,7 +20,7 @@
   #canvas { display:block; width:100vw; height:100vh; background:#000; }
   #status {
     position:fixed; left:10px; bottom:10px; font-size:12px;
-    color:#7ad; opacity:.8; padding:6px 8px; border:1px solid #134; border-radius:8px;
+    color:#7ad; opacity:.85; padding:6px 8px; border:1px solid #134; border-radius:8px;
     background:rgba(0,0,16,.35); backdrop-filter: blur(6px);
   }
 </style>
@@ -29,6 +32,9 @@
 
 <script>
 (() => {
+  const HANDS_VERSION = '0.4.1675469240'; // pinned – keep this in sync with the scripts above
+  const HANDS_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${HANDS_VERSION}`;
+
   const log = (...a) => console.debug('[Hand]', ...a);
   const warn = (...a) => console.warn('[Hand]', ...a);
   const err  = (...a) => console.error('[Hand]', ...a);
@@ -37,57 +43,50 @@
     constructor() {
       this.video  = document.getElementById('video');
       this.canvas = document.getElementById('canvas');
-      // desynchronized hint can reduce jank on some mobile browsers
-      this.ctx    = this.canvas.getContext('2d', { alpha:false, desynchronized:true, willReadFrequently:false });
+      this.ctx    = this.canvas.getContext('2d', { alpha:false, desynchronized:true });
       this.status = document.getElementById('status');
 
-      // logical canvas size (CSS pixels)
-      this.w = 0; this.h = 0; this.dpr = Math.min(2, window.devicePixelRatio || 1); // cap DPR to avoid crazy buffers
+      this.w = 0; this.h = 0; this.dpr = Math.min(2, window.devicePixelRatio || 1);
 
-      // state
       this.latestLandmarks = null;
       this.baseHandSize = 0;
 
-      this.#setupCanvas();
-      this.#setupResizeHandlers();
-      this.#initHands();
-      this.#initCamera().then(() => {
+      this.setupCanvas();
+      this.setupResizeHandlers();
+      this.initHands();
+      this.initCamera().then(() => {
         this.status.textContent = 'Hologram active';
-        this.#loop();
+        this.loop();
       });
     }
 
-    #setupResizeHandlers(){
-      const apply = () => this.#setupCanvas();
+    setupResizeHandlers(){
+      const apply = () => this.setupCanvas();
       window.addEventListener('resize', apply, { passive:true });
       window.addEventListener('orientationchange', () => setTimeout(apply, 150), { passive:true });
     }
 
-    #setupCanvas() {
-      // Fill viewport while keeping the canvas coordinate space simple (no aspect forcing)
+    setupCanvas() {
       this.w = Math.max(320, Math.min(window.innerWidth, 1280));
       this.h = Math.max(240, Math.min(window.innerHeight, 1280));
       this.dpr = Math.min(2, window.devicePixelRatio || 1);
 
-      // Set backing store size once per resize
       this.canvas.width  = Math.floor(this.w * this.dpr);
       this.canvas.height = Math.floor(this.h * this.dpr);
       this.canvas.style.width  = this.w + 'px';
       this.canvas.style.height = this.h + 'px';
 
-      // Reset + scale transform to DPR (avoid repeated scale accumulation)
       this.ctx.setTransform(1,0,0,1,0,0);
       this.ctx.scale(this.dpr, this.dpr);
 
       log('Canvas', { css:`${this.w}x${this.h}`, backing:`${this.canvas.width}x${this.canvas.height}`, dpr:this.dpr });
     }
 
-    async #initCamera(){
-      // Prefer the **back camera**
+    async initCamera(){
       const constraints = {
         video: {
-          facingMode: { ideal: 'environment' }, // try back camera
-          width:  { ideal: 640 },               // reasonable cap for speed
+          facingMode: { ideal: 'environment' }, // back camera
+          width:  { ideal: 640 },
           height: { ideal: 480 }
         },
         audio: false
@@ -100,8 +99,7 @@
         this.status.textContent = 'Camera ready (back)';
         log('Camera ready', stream.getVideoTracks()[0]?.getSettings?.());
       } catch (e1) {
-        warn('Back camera request failed, trying any camera…', e1);
-        // Fallback: any camera
+        warn('Back camera failed, trying any camera…', e1);
         const fallback = { video: true, audio: false };
         try {
           const stream = await navigator.mediaDevices.getUserMedia(fallback);
@@ -116,126 +114,124 @@
       }
     }
 
-    #initHands(){
-      // MediaPipe Hands
+    initHands(){
+      // IMPORTANT: ensure assets load from the same pinned base path
       this.hands = new Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        locateFile: (file) => `${HANDS_BASE}/${file}`
       });
 
-      // **Performance-lean settings**
+      // Lean settings for speed
       this.hands.setOptions({
-        selfieMode: false,        // we’ll draw unmirrored (back camera)
-        maxNumHands: 1,           // track one hand only
-        modelComplexity: 0,       // fastest model
+        selfieMode: false,
+        maxNumHands: 1,
+        modelComplexity: 0,
         minDetectionConfidence: 0.6,
         minTrackingConfidence: 0.6
       });
 
+      // Log asset fetches (helps diagnose 404s/CORS)
+      const _fetch = window.fetch;
+      window.fetch = async (...args) => {
+        const res = await _fetch(...args);
+        if (!res.ok) {
+          console.error('[Hand] Asset fetch failed', { url: args[0], status: res.status });
+        } else {
+          // console.debug('[Hand] Asset loaded', args[0]);
+        }
+        return res;
+      };
+
       this.hands.onResults((res) => {
-        // store latest landmarks; draw on our own RAF for smoother pacing
         const lm = res.multiHandLandmarks && res.multiHandLandmarks[0] ? res.multiHandLandmarks[0] : null;
         this.latestLandmarks = lm;
         if (!lm) return;
-
-        // initialize base size for relative scaling
         if (this.baseHandSize === 0) {
-          this.baseHandSize = this.#handLength(lm);
+          this.baseHandSize = this.handLength(lm);
         }
       });
 
-      // Camera helper: keep input resolution modest for speed
       this.camera = new Camera(this.video, {
         onFrame: async () => { await this.hands.send({ image: this.video }); },
         width:  640,
         height: 480
       });
 
-      this.camera.start().then(() => this.status.textContent = 'Tracking…').catch((e)=>err(e));
+      this.camera.start()
+        .then(() => this.status.textContent = 'Tracking…')
+        .catch((e)=>err('Camera helper error', e));
     }
 
-    #handLength(landmarks){
-      // wrist (0) to middle finger tip (12)
-      const W = this.w, H = this.h;
-      const dx = (landmarks[12].x - landmarks[0].x) * W;
-      const dy = (landmarks[12].y - landmarks[0].y) * H;
+    handLength(landmarks){
+      const dx = (landmarks[12].x - landmarks[0].x) * this.w;
+      const dy = (landmarks[12].y - landmarks[0].y) * this.h;
       return Math.hypot(dx, dy);
     }
 
-    #loop(){
+    loop(){
       const step = (t) => {
-        // Clear
         this.ctx.fillStyle = '#000';
         this.ctx.fillRect(0,0,this.w,this.h);
 
-        // Light, cheap background: subtle scanlines (one pass)
-        this.#drawScanlines(t);
+        this.drawScanlines(t);
 
-        // Draw stored hand (if any)
         if (this.latestLandmarks) {
-          this.#drawHand(this.latestLandmarks, t);
+          this.drawHand(this.latestLandmarks, t);
           this.status.textContent = 'Hand detected';
         } else {
           this.status.textContent = 'Show hand to camera';
         }
-
         requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
     }
 
-    #drawScanlines(t){
+    drawScanlines(t){
       const a = 0.05 + 0.03 * Math.sin(t*0.002);
       this.ctx.globalAlpha = a;
       this.ctx.fillStyle = '#0af';
-      const pitch = 4; // line every 4px css
+      const pitch = 4;
       for (let y=0; y<this.h; y+=pitch) {
-        this.ctx.fillRect(0, y, this.w, 1); // 1px line
+        this.ctx.fillRect(0, y, this.w, 1);
       }
       this.ctx.globalAlpha = 1;
     }
 
-    #drawHand(landmarks, t){
-      // Map to canvas coords (no mirroring for back camera)
+    drawHand(landmarks, t){
       const pts = landmarks.map(l => ({ x: l.x * this.w, y: l.y * this.h }));
+      const scale = Math.max(0.7, Math.min(1.6, this.handLength(landmarks) / Math.max(1, this.baseHandSize)));
 
-      // scale-aware thickness
-      const length = this.baseHandSize || this.#handLength(landmarks);
-      const scale = Math.max(0.6, Math.min(1.8, (this.#handLength(landmarks) / Math.max(1, length))));
-
-      // Two-pass glow: wide faint stroke, then thin bright stroke (cheap vs shadowBlur)
       const thick = 6 * scale;
       const thin  = 2.2 * scale;
 
-      // Connections (from MediaPipe drawing utils)
       const CONN = [
-        [0,1],[1,2],[2,3],[3,4],      // thumb
-        [0,5],[5,6],[6,7],[7,8],      // index
-        [0,9],[9,10],[10,11],[11,12], // middle
-        [0,13],[13,14],[14,15],[15,16], // ring
-        [0,17],[17,18],[18,19],[19,20]  // pinky
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [0,9],[9,10],[10,11],[11,12],
+        [0,13],[13,14],[14,15],[15,16],
+        [0,17],[17,18],[18,19],[19,20]
       ];
 
-      // Build path once
       const path = new Path2D();
       for (const [a,b] of CONN) {
         path.moveTo(pts[a].x, pts[a].y);
         path.lineTo(pts[b].x, pts[b].y);
       }
 
-      // PASS 1: fat, translucent cyan
       this.ctx.lineCap = 'round';
       this.ctx.lineJoin = 'round';
+
+      // wide, faint glow
       this.ctx.strokeStyle = 'rgba(0, 200, 255, 0.18)';
       this.ctx.lineWidth = thick;
       this.ctx.stroke(path);
 
-      // PASS 2: crisp, brighter core
+      // bright core
       const flicker = 0.85 + 0.15 * Math.sin(t * 0.006);
       this.ctx.strokeStyle = `rgba(120, 240, 255, ${flicker.toFixed(3)})`;
       this.ctx.lineWidth = thin;
       this.ctx.stroke(path);
 
-      // Fingertip dots (cheap circles)
+      // fingertip dots
       this.ctx.fillStyle = 'rgba(120, 240, 255, 0.9)';
       const TIPS = [4,8,12,16,20];
       const r = 3.5 * scale;
@@ -247,7 +243,12 @@
     }
   }
 
-  window.addEventListener('load', () => new MobileHandLite());
+  window.addEventListener('load', () => {
+    if (location.protocol === 'file:') {
+      console.warn('Serve this over http(s) – MediaPipe assets won’t load from file://');
+    }
+    new MobileHandLite();
+  });
 })();
 </script>
 </body>
