@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3D Audio Blob — Sensitivity Controlled</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height:100%; margin:0; background:#000; overflow:hidden; }
+  canvas { display:block; }
+  #ui {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: radial-gradient(1200px 800px at 50% 40%, rgba(20,0,40,.35), rgba(0,0,0,.85) 60%, #000);
+  }
+  #panel {
+    text-align:center; padding: 22px 26px; border-radius: 16px;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,.08); max-width: 520px;
+  }
+  #panel h1 { margin:0 0 8px; color:#c9c9ff; font:700 20px/1.2 ui-sans-serif,system-ui; letter-spacing:.3px; }
+  #panel p { margin:0 12px 14px; color:#9aa3ff; font:13px/1.4 ui-sans-serif,system-ui; opacity:.9; }
+  .btn {
+    display:inline-block; padding:10px 16px; border-radius:12px; font-weight:700; letter-spacing:.2px;
+    background: linear-gradient(135deg,#8a5cff,#28d7ff); color:#000; border:0; cursor:pointer;
+  }
+  .btn.secondary { background: rgba(255,255,255,.06); color:#cfd3ff; border:1px solid rgba(255,255,255,.1); margin-left:10px; }
+  .row { margin-top:12px; display:flex; align-items:center; justify-content:center; gap:10px; color:#aab2ff; font:12px ui-sans-serif,system-ui; }
+  input[type="range"] { width: 220px; }
+  #hint { position:fixed; left:12px; bottom:10px; color:#6b7aff; font:12px ui-sans-serif,system-ui; opacity:.75; user-select:none; }
+  #hud {
+    position:fixed; right:12px; bottom:10px; color:#7f8cff; font:12px ui-sans-serif,system-ui; opacity:.8; background:rgba(255,255,255,.04);
+    border:1px solid rgba(255,255,255,.08); border-radius:10px; padding:8px 10px;
+  }
+</style>
+</head>
+<body>
+<div id="ui" aria-live="polite">
+  <div id="panel">
+    <h1>3D Gradient Blob</h1>
+    <p>Less sensitive by default. Use the slider to adjust how reactive it is.<br/>Volume → size, displacement & color.</p>
+    <div class="row" style="margin-bottom:10px;">
+  <label for="sens">Sensitivity</label>
+  <input id="sens" type="range" min="0" max="1" step="0.01" value="0.60" />
+  <span id="sensVal">0.60</span>
+    </div>
+    <button id="start" class="btn">Use Microphone</button>
+    <button id="demo" class="btn secondary">Demo Tone</button>
+  </div>
+</div>
+<div id="hint">move = parallax • scroll = zoom • backdrop = black ✓</div>
+<div id="hud">vol: <span id="vread">0.00</span></div>
+
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+/* ------------------------------
+   Centralized sensitivity + response
+   ------------------------------ */
+const Sens = {
+  // Global sensitivity multiplier (UI controlled).
+  // 1.0 = baseline; <1 = less sensitive; >1 = more sensitive
+  value: 0.60,
+
+  // Volume mapping parameters (rms -> 0..1)
+  // Higher sensitivity should: lower threshold and widen effective range.
+  map(rms){
+  // Map sensitivity 0..1 to a reasonable threshold/range
+  const minThreshold = 0.0005, maxThreshold = 0.003;
+  const minRange = 0.08, maxRange = 0.25;
+  const threshold = maxThreshold - (maxThreshold - minThreshold) * this.value;
+  const range = minRange + (maxRange - minRange) * (1 - this.value);
+  const norm = THREE.MathUtils.clamp((rms - threshold)/range, 0, 1);
+  return Math.pow(norm, 0.85);
+// Sensitivity slider UI logic
+const sensSlider = document.getElementById('sens');
+const sensVal = document.getElementById('sensVal');
+sensSlider.addEventListener('input', e => {
+  Sens.value = parseFloat(sensSlider.value);
+  sensVal.textContent = sensSlider.value;
+});
+  },
+
+  // Downstream response scaling (so everything reacts coherently)
+  response: {
+    // Geometry displacement: base + vol*gain
+    dispBase: 0.14,   // smaller base to be calmer at idle
+    dispGain: 2.2,    // overall displacement strength
+
+    // Scale: 1 + vol*gain
+    scaleGain: 0.95,  // max extra scale amount
+
+    // Shader color mix + rim
+    mixBase: 0.25,
+    mixGain: 0.55,
+    rimBase: 1.2,
+    rimGain: 1.5
+  }
+};
+
+const state = {
+  started:false, width:innerWidth, height:innerHeight, t:0,
+  targetZoom:5.4, mouse:new THREE.Vector2(), volume:0, scaleLerp:1
+};
+
+// renderer/scene/camera
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(state.width, state.height);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+scene.fog = new THREE.FogExp2(0x000000, 0.06);
+
+const camera = new THREE.PerspectiveCamera(60, state.width/state.height, 0.1, 100);
+camera.position.set(0, 0, state.targetZoom);
+
+// lights
+scene.add(new THREE.HemisphereLight(0x6fdcff, 0x000000, 0.6));
+const p1 = new THREE.PointLight(0x9a77ff, 1.2, 40, 2); p1.position.set(3,2,3); scene.add(p1);
+const p2 = new THREE.PointLight(0x00ffd0, 1.0, 40, 2); p2.position.set(-3,-2.5,-2.5); scene.add(p2);
+
+// audio
+let audioCtx, analyser, timeData, sourceNode, fallbackOsc;
+async function initMic(){
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.75; // smoother for less jitter
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+    sourceNode = audioCtx.createMediaStreamSource(stream);
+    sourceNode.connect(analyser);
+    afterAudioReady();
+  }catch(e){
+    initDemoTone();
+  }
+}
+function initDemoTone(){
+  audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.88;
+  const osc = audioCtx.createOscillator();
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  const mainGain = audioCtx.createGain();
+  osc.type='sawtooth'; osc.frequency.value=110;
+  lfo.type='sine'; lfo.frequency.value=0.25; lfoGain.gain.value=60;
+  lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
+  mainGain.gain.value=0.20; // a tad calmer
+  osc.connect(mainGain).connect(analyser);
+  // analyser.connect(audioCtx.destination); // uncomment to hear tone
+  osc.start(); lfo.start();
+  fallbackOsc = osc;
+  afterAudioReady();
+}
+function afterAudioReady(){
+  timeData = new Float32Array(analyser.fftSize);
+  document.getElementById('ui').style.display='none';
+  state.started = true;
+  audioCtx.resume();
+}
+
+// blob geometry + shader
+const baseRadius = 1.35;
+const blobGeo = new THREE.IcosahedronGeometry(baseRadius, 7);
+const blobMat = new THREE.MeshBasicMaterial({ color: 0xffae22 });
+
+blobMat.onBeforeCompile = (shader) => {
+  shader.uniforms.uColorA = { value: new THREE.Color('#ff2a2a') }; // red
+  shader.uniforms.uColorB = { value: new THREE.Color('#ff8a1a') }; // orange
+  shader.uniforms.uRimPower = { value: 1.2 };
+  shader.uniforms.uMix = { value: 0.25 };
+
+  shader.vertexShader = shader.vertexShader.replace(
+    '#include <common>',
+    `#include <common>
+     varying vec3 vWorldNormal;
+     varying vec3 vWorldPos;`
+  ).replace(
+    '#include <beginnormal_vertex>',
+    `#include <beginnormal_vertex>
+     vWorldNormal = normalize( normalMatrix * objectNormal );`
+  ).replace(
+    '#include <begin_vertex>',
+    `#include <begin_vertex>
+     vec4 worldPos = modelMatrix * vec4( transformed, 1.0 );
+     vWorldPos = worldPos.xyz;`
+  );
+
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <common>',
+    `#include <common>
+     uniform vec3 uColorA;
+     uniform vec3 uColorB;
+     uniform float uRimPower;
+     uniform float uMix;
+     varying vec3 vWorldNormal;
+     varying vec3 vWorldPos;`
+  ).replace(
+    'vec4 diffuseColor = vec4( diffuse, opacity );',
+    `
+    vec3 base = diffuse;
+
+    // RED → ORANGE gradient by normal.y
+    float g = clamp( vWorldNormal.y * 0.5 + 0.5, 0.0, 1.0 );
+    vec3 grad = mix(uColorA, uColorB, smoothstep(0.0,1.0,g));
+
+    // subtle fresnel rim
+    vec3 V = normalize(cameraPosition - vWorldPos);
+    float fres = pow(1.0 - max(dot(normalize(vWorldNormal), V), 0.0), 1.5 + uRimPower);
+
+    vec3 mixedCol = mix(base, grad + fres*0.6, clamp(uMix,0.0,1.0));
+    vec4 diffuseColor = vec4( mixedCol, opacity );
+    `
+  );
+
+  blobMat.userData.shader = shader;
+};
+
+const blob = new THREE.Mesh(blobGeo, blobMat);
+scene.add(blob);
+
+// keep originals for displacement
+const pos = blob.geometry.attributes.position;
+const basePositions = new Float32Array(pos.array.length);
+basePositions.set(pos.array);
+blob.geometry.computeVertexNormals();
+const normals = blob.geometry.attributes.normal;
+
+// pseudo-noise
+function softNoise(x,y,z,t){
+  const a = Math.sin(0.9*x + 0.6*y + 0.8*z + 1.7*t);
+  const b = Math.sin(1.8*x - 1.2*y + 0.5*z - 1.3*t);
+  const c = Math.sin(-0.7*x + 1.5*y - 1.1*z + 0.8*t);
+  return (a + b*0.7 + c*0.5) / 2.2;
+}
+
+// starfield
+const starGeom = new THREE.BufferGeometry();
+const starCnt = 800;
+const pts = new Float32Array(starCnt*3);
+for(let i=0;i<starCnt;i++){
+  const r = 10 + Math.random()*26;
+  const th = Math.random()*Math.PI*2;
+  const ph = Math.acos(2*Math.random()-1);
+  pts[i*3+0] = r*Math.sin(ph)*Math.cos(th);
+  pts[i*3+1] = r*Math.cos(ph);
+  pts[i*3+2] = r*Math.sin(ph)*Math.sin(th);
+}
+starGeom.setAttribute('position', new THREE.BufferAttribute(pts,3));
+const stars = new THREE.Points(starGeom, new THREE.PointsMaterial({ size:0.02, color:0x6aa7ff, transparent:true, opacity:0.8, depthWrite:false }));
+scene.add(stars);
+
+// interactions
+addEventListener('resize', () => {
+  state.width = innerWidth; state.height = innerHeight;
+  camera.aspect = state.width/state.height; camera.updateProjectionMatrix();
+  renderer.setSize(state.width,state.height);
+});
+addEventListener('pointermove', (e)=>{
+  state.mouse.x = (e.clientX/innerWidth)*2-1;
+  state.mouse.y = (e.clientY/innerHeight)*2-1;
+});
+addEventListener('wheel', (e)=>{
+  state.targetZoom = THREE.MathUtils.clamp(state.targetZoom + (e.deltaY>0?0.4:-0.4), 3.5, 9.5);
+});
+
+// audio helpers — unified & less sensitive by default
+function getRMS(){
+  if(!analyser) return 0;
+  analyser.getFloatTimeDomainData(timeData);
+  let sum=0, n=timeData.length;
+  for(let i=0;i<n;i++){ const v=timeData[i]||0; sum+=v*v; }
+  return Math.sqrt(sum/n);
+}
+
+const vRead = document.getElementById('vread');
+
+// animation
+let last = performance.now();
+function tick(){
+  requestAnimationFrame(tick);
+  const now = performance.now();
+  const dt = (now - last)/1000; last = now;
+  state.t += dt;
+
+  // camera drift + parallax
+  camera.position.x = Math.sin(state.t*0.15)*0.8 + state.mouse.x*0.6;
+  camera.position.y = Math.sin(state.t*0.105)*0.4 - state.mouse.y*0.3;
+  camera.position.z += (state.targetZoom - camera.position.z)*0.06;
+  camera.lookAt(0,0,0);
+
+  stars.rotation.y += 0.002;
+
+  if(state.started){
+    const rms = getRMS();
+    const vol = Sens.map(rms); // central mapping
+    state.volume += (vol - state.volume) * 0.12;
+
+    // Displacement amplitude (base + gain * vol)
+    const amp = Sens.response.dispBase + state.volume * Sens.response.dispGain;
+
+    // displace vertices
+    const posAttr = blob.geometry.attributes.position;
+    const norAttr = blob.geometry.attributes.normal;
+    for(let i=0;i<posAttr.count;i++){
+      const ix = i*3;
+      const bx = basePositions[ix+0], by = basePositions[ix+1], bz = basePositions[ix+2];
+      const nx = norAttr.getX(i), ny = norAttr.getY(i), nz = norAttr.getZ(i);
+      const n1 = softNoise(bx*1.2, by*1.2, bz*1.2, state.t*0.95);
+      const n2 = softNoise(bx*0.6+1.7, by*0.6-0.9, bz*0.6+0.4, state.t*1.6);
+      const disp = (n1*0.6 + n2*0.4) * amp;
+      posAttr.array[ix+0] = bx + nx * disp;
+      posAttr.array[ix+1] = by + ny * disp;
+      posAttr.array[ix+2] = bz + nz * disp;
+    }
+    posAttr.needsUpdate = true;
+    blob.geometry.computeVertexNormals();
+
+    // Scale response
+    const targetScale = 1.0 + state.volume * Sens.response.scaleGain;
+    state.scaleLerp += (targetScale - state.scaleLerp) * 0.12;
+    blob.scale.setScalar(state.scaleLerp);
+
+    // Shader response (same sensitivity basis)
+    const sh = blobMat.userData.shader;
+    if(sh){
+      sh.uniforms.uMix.value = THREE.MathUtils.clamp(
+        Sens.response.mixBase + state.volume * Sens.response.mixGain, 0, 1
+      );
+      sh.uniforms.uRimPower.value = Sens.response.rimBase + state.volume * Sens.response.rimGain;
+    }
+
+    // HUD
+    vRead.textContent = state.volume.toFixed(2);
+  }
+
+  renderer.render(scene, camera);
+}
+tick();
+
+// UI wiring
+const sensSlider = document.getElementById('sens');
+const sensVal = document.getElementById('sensVal');
+sensSlider.addEventListener('input', () => {
+  Sens.value = parseFloat(sensSlider.value);
+  sensVal.textContent = Sens.value.toFixed(2)+'×';
+});
+
+document.getElementById('start').addEventListener('click', async ()=>{
+  if(!audioCtx || audioCtx.state==='suspended'){ try{ await initMic(); }catch(e){} } else { await initMic(); }
+});
+document.getElementById('demo').addEventListener('click', ()=>{ if(!audioCtx || audioCtx.state==='suspended'){ initDemoTone(); } else { initDemoTone(); } });
+addEventListener('click', ()=>{ if(audioCtx && audioCtx.state==='suspended') audioCtx.resume(); }, {passive:true});
+addEventListener('touchstart', ()=>{ if(audioCtx && audioCtx.state==='suspended') audioCtx.resume(); }, {passive:true});
+</script>
+</body>
+</html>
