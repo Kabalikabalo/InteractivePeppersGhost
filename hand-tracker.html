@@ -3,26 +3,25 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Blue Wireframe Hand (MediaPipe)</title>
+<title>Palm Polygon + Cylindrical Fingers (MediaPipe)</title>
 <style>
-  html, body { height: 100%; margin: 0; background: #000; overflow: hidden; }
-  /* Canvas fills the screen; we draw the wireframe on it */
+  html, body { height:100%; margin:0; background:#000; overflow:hidden; }
   #canvas { display:block; width:100vw; height:100vh; }
-  /* Video is hidden; it just feeds frames to MediaPipe */
-  #video { display:none; }
-  .hint {
-    position: fixed; left: 12px; bottom: 12px;
-    color:#39a8ff; font: 12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    opacity:.7; user-select:none; pointer-events:none;
+  #video  { display:none; }
+  .hint{
+    position:fixed; left:12px; bottom:12px;
+    color:#39a8ff; font:12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    opacity:.85; user-select:none; pointer-events:none;
+    text-shadow:0 0 6px rgba(57,168,255,.6);
   }
 </style>
 </head>
 <body>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
-  <div class="hint">Back camera • Blue wireframe • MediaPipe Hands</div>
+  <div class="hint">Back camera • Palm polygon + cylindrical fingers</div>
 
-  <!-- MediaPipe libraries -->
+  <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
@@ -30,24 +29,22 @@
     (async () => {
       const video  = document.getElementById('video');
       const canvas = document.getElementById('canvas');
-      const ctx    = canvas.getContext('2d', { alpha: false }); // opaque for performance
+      const ctx    = canvas.getContext('2d', { alpha:false });
 
-      // Prefer the back camera; gracefully fall back if needed.
+      // ---------- utils ----------
+      const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+      const lerp  = (a, b, t) => a + (b - a) * t;
+
       async function getBackCameraStream() {
-        const attempts = [
-          { video: { facingMode: { exact: 'environment' } }, audio: false },
-          { video: { facingMode: 'environment' },           audio: false },
-          { video: true,                                    audio: false }
+        const tries = [
+          { video: { facingMode: { exact: 'environment' } }, audio:false },
+          { video: { facingMode: 'environment' },            audio:false },
+          { video: true,                                     audio:false },
         ];
-        for (const constraints of attempts) {
-          try {
-            return await navigator.mediaDevices.getUserMedia(constraints);
-          } catch (e) { /* try next */ }
-        }
-        throw new Error('No usable camera found.');
+        for (const c of tries) { try { return await navigator.mediaDevices.getUserMedia(c); } catch(_){} }
+        throw new Error('No usable camera found');
       }
 
-      // Keep the canvas sized to the camera’s native resolution
       function resizeToVideo() {
         const w = video.videoWidth  || 1280;
         const h = video.videoHeight || 720;
@@ -56,10 +53,191 @@
       }
       window.addEventListener('resize', resizeToVideo);
 
-      // ---- MediaPipe Hands setup ----
-      const hands = new Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-      });
+      const toPx = (lm) => ({ x: lm.x * canvas.width, y: lm.y * canvas.height, z: lm.z });
+
+      function handDiagPx(pxLm){
+        let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+        for (const p of pxLm){ if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x; if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y; }
+        return Math.hypot(maxX-minX, maxY-minY);
+      }
+
+      // ---------- topology ----------
+      // IMPORTANT: fingers start at their base joint (NO wrist->base connection)
+      const FINGERS = [
+        [1,2,3,4],        // Thumb (no 0->1)
+        [5,6,7,8],        // Index (no 0->5)
+        [9,10,11,12],     // Middle
+        [13,14,15,16],    // Ring
+        [17,18,19,20]     // Pinky
+      ];
+
+      // Palm polygon indices (wrist → pinky base → ring base → middle base → index base → thumb CMC → back to wrist)
+      const PALM_LOOP = [0,17,13,9,5,1,0];
+
+      // Smoothed global scale to reduce jitter
+      let smoothedScale = 1;
+
+      // ---------- palm polygon (solid, thick outline; no finger connections) ----------
+      function drawPalmPolygon(px, scale){
+        // Path
+        ctx.save();
+        ctx.beginPath();
+        for (let i=0;i<PALM_LOOP.length;i++){
+          const p = px[PALM_LOOP[i]];
+          if (i===0) ctx.moveTo(p.x, p.y);
+          else ctx.lineTo(p.x, p.y);
+        }
+        ctx.closePath();
+
+        // Fill
+        const fillA = clamp(0.16 + 0.20*scale, 0.16, 0.40);
+        ctx.fillStyle = `rgba(30,144,255,${fillA})`;
+        ctx.shadowColor = '#1e90ff';
+        ctx.shadowBlur  = 12 * scale;
+        ctx.fill();
+
+        // Outline thickness/glow
+        ctx.shadowBlur = 0;
+        ctx.lineJoin   = 'round';
+        ctx.lineCap    = 'round';
+        ctx.lineWidth  = Math.max(2, 10 * scale);
+        ctx.strokeStyle= 'rgba(51,170,255,0.85)';
+        ctx.stroke();
+
+        // Inner rim darkening (to add volume)
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.lineWidth = Math.max(1, 6 * scale);
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+        ctx.stroke();
+        ctx.globalCompositeOperation = 'source-over';
+
+        // Soft AO blobs at finger bases to blend cylinders into palm
+        const bases = [1,5,9,13,17];
+        for (const i of bases){
+          const p = px[i];
+          const r = 18 * scale;
+          const g = ctx.createRadialGradient(p.x,p.y,0, p.x,p.y,r);
+          g.addColorStop(0,'rgba(0,0,0,0.28)');
+          g.addColorStop(1,'rgba(0,0,0,0.00)');
+          ctx.fillStyle = g;
+          ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2); ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // ---------- cylindrical finger segments + domes ----------
+      function pathCapsule(len, w){
+        const r = w * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(-len/2, -r);
+        ctx.lineTo( len/2, -r);
+        ctx.arc( len/2, 0, r, -Math.PI/2,  Math.PI/2);
+        ctx.lineTo(-len/2,  r);
+        ctx.arc(-len/2, 0, r,  Math.PI/2, -Math.PI/2);
+        ctx.closePath();
+      }
+
+      function drawEllipticalDome(cx, cy, angle, rx, ry, alpha=0.95){
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(angle);
+        ctx.scale(1, ry / rx);
+        const r = rx;
+        const g = ctx.createRadialGradient(0,0,0, 0,0,r);
+        g.addColorStop(0.00, `rgba(191,225,255,${alpha})`);
+        g.addColorStop(0.35, 'rgba(120,190,255,0.70)');
+        g.addColorStop(1.00, 'rgba(120,190,255,0.00)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+
+      function drawAO(cx, cy, angle, rx, ry, strength=0.35){
+        ctx.save();
+        ctx.globalCompositeOperation = 'multiply';
+        ctx.translate(cx, cy);
+        ctx.rotate(angle);
+        ctx.scale(1, ry / rx);
+        const r = rx;
+        const g = ctx.createRadialGradient(0,0,0, 0,0,r);
+        g.addColorStop(0.00, `rgba(0,0,0,${strength})`);
+        g.addColorStop(1.00, 'rgba(0,0,0,0.00)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+
+      function drawCylinderSegment(a, b, w, scale, addDomes=true){
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 0.5) return;
+
+        const angle = Math.atan2(dy, dx);
+        const mx = (a.x + b.x) * 0.5, my = (a.y + b.y) * 0.5;
+
+        ctx.save();
+        ctx.translate(mx, my);
+        ctx.rotate(angle);
+
+        // Base cylindrical gradient across width
+        const coreA = clamp(0.52 + 0.22*scale, 0.50, 0.85);
+        const gradY = ctx.createLinearGradient(0, -w/2, 0, w/2);
+        gradY.addColorStop(0.00, 'rgba(15,60,160,0.22)');
+        gradY.addColorStop(0.16, 'rgba(45,130,245,0.40)');
+        gradY.addColorStop(0.50, `rgba(120,190,255,${coreA})`);
+        gradY.addColorStop(0.84, 'rgba(45,130,245,0.40)');
+        gradY.addColorStop(1.00, 'rgba(15,60,160,0.22)');
+
+        pathCapsule(len, w);
+        ctx.fillStyle = gradY;
+        ctx.shadowColor = '#1e90ff';
+        ctx.shadowBlur  = 10 * scale;
+        ctx.fill();
+
+        // Rim darkening (multiply)
+        const rim = ctx.createLinearGradient(0, -w/2, 0, w/2);
+        rim.addColorStop(0.00, 'rgba(0,0,0,0.38)');
+        rim.addColorStop(0.50, 'rgba(0,0,0,0.00)');
+        rim.addColorStop(1.00, 'rgba(0,0,0,0.38)');
+        ctx.save();
+        ctx.globalCompositeOperation = 'multiply';
+        pathCapsule(len, w);
+        ctx.fillStyle = rim;
+        ctx.fill();
+        ctx.restore();
+
+        // Longitudinal subtle overlay
+        const gradX = ctx.createLinearGradient(-len/2, 0, len/2, 0);
+        gradX.addColorStop(0.00, 'rgba(0,0,0,0.08)');
+        gradX.addColorStop(0.50, 'rgba(255,255,255,0.06)');
+        gradX.addColorStop(1.00, 'rgba(0,0,0,0.08)');
+        pathCapsule(len, w);
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.fillStyle = gradX; ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+
+        // Specular stripe
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = 'rgba(191,225,255,0.95)';
+        ctx.lineCap = 'round';
+        ctx.lineWidth = Math.max(1, w * 0.22);
+        ctx.beginPath(); ctx.moveTo(-len*0.40, 0); ctx.lineTo(len*0.40, 0); ctx.stroke();
+
+        // Domes/AO at ends
+        if (addDomes){
+          const rxTip = w * 0.70,  ryTip = w * 0.56;
+          const rxBase= w * 0.58,  ryBase= w * 0.46;
+          drawEllipticalDome( len/2, 0, 0, rxTip,  ryTip, 0.98);
+          drawEllipticalDome(-len/2, 0, 0, rxBase, ryBase, 0.62);
+          drawAO( len/2, 0, 0, w*0.44, w*0.34, 0.28);
+          drawAO(-len/2, 0, 0, w*0.40, w*0.30, 0.24);
+        }
+
+        ctx.restore();
+      }
+
+      // ---- MediaPipe Hands ----
+      const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
       hands.setOptions({
         maxNumHands: 2,
         modelComplexity: 1,
@@ -68,27 +246,73 @@
       });
 
       hands.onResults((results) => {
-        // Black background
+        // Clear
         ctx.save();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.setTransform(1,0,0,1,0,0);
+        ctx.clearRect(0,0,canvas.width,canvas.height);
         ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillRect(0,0,canvas.width,canvas.height);
 
-        // Blue wireframe
-        if (results.multiHandLandmarks) {
-          ctx.lineCap  = 'round';
-          ctx.lineJoin = 'round';
-          for (const landmarks of results.multiHandLandmarks) {
-            // Lines between joints
-            drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color: '#1e90ff', lineWidth: 3 });
-            // Joint points
-            drawLandmarks(ctx,  landmarks,                     { color: '#1e90ff', radius: 2 });
-          }
+        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
+          ctx.restore(); return;
         }
+
+        for (const lm of results.multiHandLandmarks){
+          const px = lm.map(toPx);
+
+          // Distance-aware scaling (on-screen size)
+          const diag = handDiagPx(px);
+          const rawScale = clamp(diag / 500, 0.30, 2.2);
+          smoothedScale  = lerp(smoothedScale, rawScale, 0.25);
+          const baseW    = 20 * smoothedScale;
+
+          // 1) Palm polygon (behind everything)
+          drawPalmPolygon(px, smoothedScale);
+
+          // 2) Build finger segments (NO 0->base), with taper + depth
+          const tapers = [1.00, 0.90, 0.78, 0.66];
+          const segments = [];
+          const tipDomes = [];
+
+          for (const chain of FINGERS){
+            for (let i=0; i<chain.length-1; i++){
+              const a = px[chain[i]], b = px[chain[i+1]];
+              const w = baseW * tapers[i];
+              segments.push({ a, b, w, z: (a.z + b.z)/2 });
+              if (i === chain.length-2){
+                tipDomes.push({ p:b, prev:a, w, z:b.z });
+              }
+            }
+          }
+
+          // Depth sort: far (higher z) first → near (more negative) last
+          segments.sort((s1, s2) => s2.z - s1.z);
+
+          // 3) Draw cylindrical segments
+          for (const s of segments){
+            drawCylinderSegment(s.a, s.b, s.w, smoothedScale, true);
+          }
+
+          // 4) Extra-bright fingertip domes (after segments, also depth-sorted)
+          tipDomes.sort((d1, d2) => d2.z - d1.z);
+          for (const d of tipDomes){
+            const dx = d.p.x - d.prev.x, dy = d.p.y - d.prev.y;
+            const ang = Math.atan2(dy, dx);
+            drawEllipticalDome(d.p.x, d.p.y, ang, d.w*0.80, d.w*0.64, 1.0);
+            // tiny sparkle
+            ctx.save();
+            ctx.fillStyle = 'rgba(255,255,255,0.88)';
+            ctx.beginPath(); ctx.arc(d.p.x + Math.cos(ang)*d.w*0.12, d.p.y + Math.sin(ang)*d.w*0.12, Math.max(1, d.w*0.10), 0, Math.PI*2); ctx.fill();
+            ctx.restore();
+          }
+
+          // NOTE: No HAND_CONNECTIONS / no palm→finger lines at all.
+        }
+
         ctx.restore();
       });
 
-      // ---- Start camera and processing loop ----
+      // ---- Start camera + loop ----
       try {
         const stream = await getBackCameraStream();
         video.srcObject = stream;
@@ -101,7 +325,7 @@
       if (video.readyState >= 2) resizeToVideo();
       else video.addEventListener('loadedmetadata', resizeToVideo);
 
-      async function tick() {
+      async function tick(){
         if (video.readyState >= 2) {
           await hands.send({ image: video });
         }
