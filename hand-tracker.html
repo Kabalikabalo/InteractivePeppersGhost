@@ -3,10 +3,15 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Palm Polygon + Cylindrical Fingers (MediaPipe)</title>
+<title>Palm Polygon + Cylindrical Fingers + Fast Grab Circles</title>
 <style>
   html, body { height:100%; margin:0; background:#000; overflow:hidden; }
-  #canvas { display:block; width:100vw; height:100vh; }
+  /* We’ll size the canvas in JS to PRESERVE ASPECT RATIO (no stretching) */
+  #canvas {
+    position: fixed; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    display: block;
+  }
   #video  { display:none; }
   .hint{
     position:fixed; left:12px; bottom:12px;
@@ -14,12 +19,19 @@
     opacity:.85; user-select:none; pointer-events:none;
     text-shadow:0 0 6px rgba(57,168,255,.6);
   }
+  .hud{
+    position:fixed; right:12px; bottom:12px;
+    color:#ff6b6b; font:12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    opacity:.95; user-select:none; pointer-events:none;
+    text-align:right;
+  }
 </style>
 </head>
 <body>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
-  <div class="hint">Back camera • Palm polygon + cylindrical fingers</div>
+  <div class="hint">Back camera • Palm polygon + cylindrical fingers • Pinch (thumb+index) to grab</div>
+  <div class="hud" id="hud"></div>
 
   <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
@@ -30,6 +42,7 @@
       const video  = document.getElementById('video');
       const canvas = document.getElementById('canvas');
       const ctx    = canvas.getContext('2d', { alpha:false });
+      const hud    = document.getElementById('hud');
 
       // ---------- utils ----------
       const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -48,10 +61,19 @@
       function resizeToVideo() {
         const w = video.videoWidth  || 1280;
         const h = video.videoHeight || 720;
-        canvas.width  = w;
+        canvas.width  = w;    // internal render size
         canvas.height = h;
+        layoutCanvasOnScreen(); // make CSS size match aspect ratio (no stretching)
       }
-      window.addEventListener('resize', resizeToVideo);
+
+      function layoutCanvasOnScreen(){
+        // Preserve aspect ratio: scale canvas uniformly to fit the window
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const scale = Math.min(vw / canvas.width, vh / canvas.height);
+        canvas.style.width  = (canvas.width  * scale) + 'px';
+        canvas.style.height = (canvas.height * scale) + 'px';
+      }
+      window.addEventListener('resize', layoutCanvasOnScreen);
 
       const toPx = (lm) => ({ x: lm.x * canvas.width, y: lm.y * canvas.height, z: lm.z });
 
@@ -62,41 +84,34 @@
       }
 
       // ---------- topology ----------
-      // IMPORTANT: fingers start at their base joint (NO wrist->base connection)
       const FINGERS = [
-        [1,2,3,4],        // Thumb (no 0->1)
-        [5,6,7,8],        // Index (no 0->5)
+        [1,2,3,4],        // Thumb (NO wrist->1)
+        [5,6,7,8],        // Index
         [9,10,11,12],     // Middle
         [13,14,15,16],    // Ring
         [17,18,19,20]     // Pinky
       ];
-
-      // Palm polygon indices (wrist → pinky base → ring base → middle base → index base → thumb CMC → back to wrist)
       const PALM_LOOP = [0,17,13,9,5,1,0];
 
-      // Smoothed global scale to reduce jitter
+      // Smoothed global scale to reduce jitter (visuals only)
       let smoothedScale = 1;
 
-      // ---------- palm polygon (solid, thick outline; no finger connections) ----------
+      // ---------- palm polygon ----------
       function drawPalmPolygon(px, scale){
-        // Path
         ctx.save();
         ctx.beginPath();
         for (let i=0;i<PALM_LOOP.length;i++){
           const p = px[PALM_LOOP[i]];
-          if (i===0) ctx.moveTo(p.x, p.y);
-          else ctx.lineTo(p.x, p.y);
+          if (i===0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
         }
         ctx.closePath();
 
-        // Fill
         const fillA = clamp(0.16 + 0.20*scale, 0.16, 0.40);
         ctx.fillStyle = `rgba(30,144,255,${fillA})`;
         ctx.shadowColor = '#1e90ff';
-        ctx.shadowBlur  = 12 * scale;
+        ctx.shadowBlur  = 10 * scale;
         ctx.fill();
 
-        // Outline thickness/glow
         ctx.shadowBlur = 0;
         ctx.lineJoin   = 'round';
         ctx.lineCap    = 'round';
@@ -104,14 +119,14 @@
         ctx.strokeStyle= 'rgba(51,170,255,0.85)';
         ctx.stroke();
 
-        // Inner rim darkening (to add volume)
+        // Inner rim darkening for volume
         ctx.globalCompositeOperation = 'multiply';
         ctx.lineWidth = Math.max(1, 6 * scale);
         ctx.strokeStyle = 'rgba(0,0,0,0.25)';
         ctx.stroke();
         ctx.globalCompositeOperation = 'source-over';
 
-        // Soft AO blobs at finger bases to blend cylinders into palm
+        // AO blobs at finger bases
         const bases = [1,5,9,13,17];
         for (const i of bases){
           const p = px[i];
@@ -179,7 +194,6 @@
         ctx.translate(mx, my);
         ctx.rotate(angle);
 
-        // Base cylindrical gradient across width
         const coreA = clamp(0.52 + 0.22*scale, 0.50, 0.85);
         const gradY = ctx.createLinearGradient(0, -w/2, 0, w/2);
         gradY.addColorStop(0.00, 'rgba(15,60,160,0.22)');
@@ -194,7 +208,6 @@
         ctx.shadowBlur  = 10 * scale;
         ctx.fill();
 
-        // Rim darkening (multiply)
         const rim = ctx.createLinearGradient(0, -w/2, 0, w/2);
         rim.addColorStop(0.00, 'rgba(0,0,0,0.38)');
         rim.addColorStop(0.50, 'rgba(0,0,0,0.00)');
@@ -206,7 +219,6 @@
         ctx.fill();
         ctx.restore();
 
-        // Longitudinal subtle overlay
         const gradX = ctx.createLinearGradient(-len/2, 0, len/2, 0);
         gradX.addColorStop(0.00, 'rgba(0,0,0,0.08)');
         gradX.addColorStop(0.50, 'rgba(255,255,255,0.06)');
@@ -216,14 +228,12 @@
         ctx.fillStyle = gradX; ctx.fill();
         ctx.globalCompositeOperation = 'source-over';
 
-        // Specular stripe
         ctx.shadowBlur = 0;
         ctx.strokeStyle = 'rgba(191,225,255,0.95)';
         ctx.lineCap = 'round';
         ctx.lineWidth = Math.max(1, w * 0.22);
         ctx.beginPath(); ctx.moveTo(-len*0.40, 0); ctx.lineTo(len*0.40, 0); ctx.stroke();
 
-        // Domes/AO at ends
         if (addDomes){
           const rxTip = w * 0.70,  ryTip = w * 0.56;
           const rxBase= w * 0.58,  ryBase= w * 0.46;
@@ -236,7 +246,160 @@
         ctx.restore();
       }
 
-      // ---- MediaPipe Hands ----
+      // ---------- INTERACTIVE OBJECTS (front layer) ----------
+      const circles = [];
+      const NUM_CIRCLES = 6;
+      const R_MIN = 18, R_MAX = 32;
+
+      function random(min,max){ return min + Math.random()*(max-min); }
+
+      function spawnCircles(){
+        circles.length = 0;
+        for (let i=0; i<NUM_CIRCLES; i++){
+          const r = random(R_MIN, R_MAX);
+          circles.push({
+            x: random(r, canvas.width  - r),
+            y: random(r, canvas.height - r),
+            vx: random(-50,50), vy: random(-50,50),
+            r,
+            grabbed:false
+          });
+        }
+      }
+
+      function drawCircle(c){
+        // red glossy ball with rim + spec
+        const g = ctx.createRadialGradient(c.x - c.r*0.3, c.y - c.r*0.3, c.r*0.2, c.x, c.y, c.r*1.05);
+        g.addColorStop(0.0, 'rgba(255,130,130,1.0)');
+        g.addColorStop(0.4, 'rgba(255,60,60,0.95)');
+        g.addColorStop(1.0, 'rgba(160,0,0,0.95)');
+        ctx.fillStyle = g;
+        ctx.shadowColor = 'rgba(255,60,60,0.8)';
+        ctx.shadowBlur = 12;
+        ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI*2); ctx.fill();
+
+        // rim
+        ctx.shadowBlur = 0;
+        ctx.globalCompositeOperation = 'multiply';
+        const rim = ctx.createRadialGradient(c.x, c.y, c.r*0.8, c.x, c.y, c.r);
+        rim.addColorStop(0, 'rgba(0,0,0,0)');
+        rim.addColorStop(1, 'rgba(0,0,0,0.35)');
+        ctx.fillStyle = rim;
+        ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI*2); ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+
+        // spec highlight
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.beginPath();
+        ctx.ellipse(c.x - c.r*0.35, c.y - c.r*0.35, c.r*0.25, c.r*0.18, -0.8, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      // physics & hand interaction
+      let grabbedIndex = -1;
+      let lastT = performance.now();
+      let spawned = false;
+      let prevPinchActive = false;
+
+      // fingertip velocity (for prediction)
+      let prevFinger = null, fingerVel = {x:0,y:0};
+
+      function updateCircles(dt, finger, pinch, diag){
+        // >>> FASTER FOLLOW: PD controller + tiny prediction <<<
+        const leadTime   = 0.05;              // seconds to look ahead
+        const kp         = 180.0;             // spring stiffness toward target
+        const kd         = 22.0;              // damping against velocity
+        const damping    = 0.985;             // global friction (light)
+        const maxAccel   = 50000;             // clamp crazy accelerations
+        const maxSpeed   = 2000;              // clamp speed
+        const pickRadius = clamp(diag*0.08, 40, 110);
+
+        // fingertip predicted target
+        const targetX = finger.x + fingerVel.x * leadTime;
+        const targetY = finger.y + fingerVel.y * leadTime;
+
+        // Pinch hysteresis (on/off thresholds)
+        const onThr  = clamp(diag * 0.09, 25, 85);
+        const offThr = onThr * 1.4;
+
+        // If pinch just started, pick nearest circle in radius
+        if (pinch.active && !prevPinchActive){
+          let best = -1, bestD = Infinity;
+          for (let i=0;i<circles.length;i++){
+            const c = circles[i];
+            const d = Math.hypot(finger.x - c.x, finger.y - c.y);
+            if (d < pickRadius && d < bestD){ bestD = d; best = i; }
+          }
+          grabbedIndex = best;
+          if (grabbedIndex >= 0) circles[grabbedIndex].grabbed = true;
+        }
+
+        // If pinch ended, release
+        if (!pinch.active && prevPinchActive && grabbedIndex >= 0){
+          circles[grabbedIndex].grabbed = false;
+          grabbedIndex = -1;
+        }
+
+        // Integrate motion
+        for (let i=0;i<circles.length;i++){
+          const c = circles[i];
+
+          if (i === grabbedIndex){
+            // PD toward predicted fingertip
+            const ex = targetX - c.x;
+            const ey = targetY - c.y;
+            let ax = kp * ex - kd * c.vx;
+            let ay = kp * ey - kd * c.vy;
+            // clamp acceleration
+            const aMag = Math.hypot(ax, ay);
+            if (aMag > maxAccel){ const s = maxAccel / aMag; ax*=s; ay*=s; }
+            c.vx += ax * dt;
+            c.vy += ay * dt;
+
+            // Optional: if super close, snap to fingertip to kill tiny lag
+            if (Math.hypot(ex,ey) < 3) { c.x = targetX; c.y = targetY; c.vx *= 0.5; c.vy *= 0.5; }
+          }
+
+          // Clamp speed
+          const sp = Math.hypot(c.vx, c.vy);
+          if (sp > maxSpeed){ const s = maxSpeed / sp; c.vx *= s; c.vy *= s; }
+
+          // Integrate
+          c.x += c.vx * dt;
+          c.y += c.vy * dt;
+          c.vx *= damping;
+          c.vy *= damping;
+
+          // Walls
+          if (c.x < c.r){ c.x = c.r; c.vx = Math.abs(c.vx); }
+          if (c.x > canvas.width - c.r){ c.x = canvas.width - c.r; c.vx = -Math.abs(c.vx); }
+          if (c.y < c.r){ c.y = c.r; c.vy = Math.abs(c.vy); }
+          if (c.y > canvas.height - c.r){ c.y = canvas.height - c.r; c.vy = -Math.abs(c.vy); }
+        }
+
+        // separation (simple) to avoid overlaps
+        for (let a=0; a<circles.length; a++){
+          for (let b=a+1; b<circles.length; b++){
+            const ca = circles[a], cb = circles[b];
+            const dx = cb.x - ca.x, dy = cb.y - ca.y;
+            const dist = Math.hypot(dx, dy);
+            const minDist = ca.r + cb.r - 1;
+            if (dist > 0 && dist < minDist){
+              const push = (minDist - dist) * 0.5;
+              const ux = dx / dist, uy = dy / dist;
+              ca.x -= ux * push; ca.y -= uy * push;
+              cb.x += ux * push; cb.y += uy * push;
+            }
+          }
+        }
+
+        hud.textContent =
+          (grabbedIndex >= 0 ? 'GRABBING • ' : '') +
+          `pinch ${pinch.active?'ON':'OFF'} • lead ${Math.round(leadTime*1000)}ms`;
+        prevPinchActive = pinch.active;
+      }
+
+      // ---------- MediaPipe Hands ----------
       const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
       hands.setOptions({
         maxNumHands: 2,
@@ -246,6 +409,15 @@
       });
 
       hands.onResults((results) => {
+        const now = performance.now();
+        // smaller clamp for crisper physics (aim 60fps)
+        let dt = (now - lastT) / 1000;
+        lastT = now;
+        // Substep if the frame was long (keeps PD stable)
+        const STEP = 1/60;
+        let steps = Math.max(1, Math.min(4, Math.ceil(dt / STEP)));
+        const subdt = dt / steps;
+
         // Clear
         ctx.save();
         ctx.setTransform(1,0,0,1,0,0);
@@ -253,23 +425,21 @@
         ctx.fillStyle = '#000';
         ctx.fillRect(0,0,canvas.width,canvas.height);
 
-        if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
-          ctx.restore(); return;
-        }
+        let finger = prevFinger || {x:canvas.width/2, y:canvas.height/2};
+        let pinchActive = false;
+        let diag = 500;
 
-        for (const lm of results.multiHandLandmarks){
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0){
+          const lm = results.multiHandLandmarks[0];
           const px = lm.map(toPx);
-
-          // Distance-aware scaling (on-screen size)
-          const diag = handDiagPx(px);
-          const rawScale = clamp(diag / 500, 0.30, 2.2);
+          const d  = handDiagPx(px);
+          diag = d;
+          const rawScale = clamp(d / 500, 0.30, 2.2);
           smoothedScale  = lerp(smoothedScale, rawScale, 0.25);
           const baseW    = 20 * smoothedScale;
 
-          // 1) Palm polygon (behind everything)
+          // --- draw HAND (behind) ---
           drawPalmPolygon(px, smoothedScale);
-
-          // 2) Build finger segments (NO 0->base), with taper + depth
           const tapers = [1.00, 0.90, 0.78, 0.66];
           const segments = [];
           const tipDomes = [];
@@ -284,30 +454,49 @@
               }
             }
           }
-
-          // Depth sort: far (higher z) first → near (more negative) last
           segments.sort((s1, s2) => s2.z - s1.z);
-
-          // 3) Draw cylindrical segments
-          for (const s of segments){
-            drawCylinderSegment(s.a, s.b, s.w, smoothedScale, true);
-          }
-
-          // 4) Extra-bright fingertip domes (after segments, also depth-sorted)
+          for (const s of segments){ drawCylinderSegment(s.a, s.b, s.w, smoothedScale, true); }
           tipDomes.sort((d1, d2) => d2.z - d1.z);
           for (const d of tipDomes){
             const dx = d.p.x - d.prev.x, dy = d.p.y - d.prev.y;
             const ang = Math.atan2(dy, dx);
             drawEllipticalDome(d.p.x, d.p.y, ang, d.w*0.80, d.w*0.64, 1.0);
-            // tiny sparkle
             ctx.save();
             ctx.fillStyle = 'rgba(255,255,255,0.88)';
             ctx.beginPath(); ctx.arc(d.p.x + Math.cos(ang)*d.w*0.12, d.p.y + Math.sin(ang)*d.w*0.12, Math.max(1, d.w*0.10), 0, Math.PI*2); ctx.fill();
             ctx.restore();
           }
 
-          // NOTE: No HAND_CONNECTIONS / no palm→finger lines at all.
+          // --- gestures: pinch with hysteresis ---
+          const tipIndex = px[8], tipThumb = px[4];
+          finger = { x: tipIndex.x, y: tipIndex.y };
+          const pinchDist = Math.hypot(tipIndex.x - tipThumb.x, tipIndex.y - tipThumb.y);
+          const onThr  = clamp(d * 0.09, 25, 85);
+          const offThr = onThr * 1.4;
+          pinchActive = prevPinchActive ? (pinchDist < offThr) : (pinchDist < onThr);
+        } else {
+          // no hand → release any grabbed circle
+          if (grabbedIndex >= 0) { circles[grabbedIndex].grabbed = false; grabbedIndex = -1; }
         }
+
+        // fingertip velocity (prediction)
+        if (prevFinger){
+          const vx = (finger.x - prevFinger.x) / dt;
+          const vy = (finger.y - prevFinger.y) / dt;
+          // light smoothing on velocity only
+          fingerVel.x = lerp(fingerVel.x, vx, 0.4);
+          fingerVel.y = lerp(fingerVel.y, vy, 0.4);
+        }
+        prevFinger = { ...finger };
+
+        // update physics in small substeps for stability
+        if (!spawned) { spawnCircles(); spawned = true; }
+        for (let s=0; s<steps; s++){
+          updateCircles(subdt, finger, {active: pinchActive}, diag);
+        }
+
+        // draw OBJECTS (FRONT)
+        for (const c of circles){ drawCircle(c); }
 
         ctx.restore();
       });
