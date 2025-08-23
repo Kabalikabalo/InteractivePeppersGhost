@@ -1,255 +1,114 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta
-  name="viewport"
-  content="width=device-width, initial-scale=1, user-scalable=no"
-/>
-<title>Mobile Holographic Hand — Back Camera (Fixed Assets)</title>
-
-<!-- Pin exact versions to avoid moving targets -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.4.1675469240/camera_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.4.1675469240/drawing_utils.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
-
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Blue Wireframe Hand (MediaPipe)</title>
 <style>
-  * { box-sizing: border-box; margin:0; padding:0; }
-  html, body { width:100%; height:100%; background:#000; color:#9fe; font-family: system-ui, -apple-system, Arial; overflow:hidden; }
+  html, body { height: 100%; margin: 0; background: #000; overflow: hidden; }
+  /* Canvas fills the screen; we draw the wireframe on it */
+  #canvas { display:block; width:100vw; height:100vh; }
+  /* Video is hidden; it just feeds frames to MediaPipe */
   #video { display:none; }
-  #canvas { display:block; width:100vw; height:100vh; background:#000; }
-  #status {
-    position:fixed; left:10px; bottom:10px; font-size:12px;
-    color:#7ad; opacity:.85; padding:6px 8px; border:1px solid #134; border-radius:8px;
-    background:rgba(0,0,16,.35); backdrop-filter: blur(6px);
+  .hint {
+    position: fixed; left: 12px; bottom: 12px;
+    color:#39a8ff; font: 12px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    opacity:.7; user-select:none; pointer-events:none;
   }
 </style>
 </head>
 <body>
-<video id="video" autoplay muted playsinline></video>
-<canvas id="canvas"></canvas>
-<div id="status">Initializing…</div>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+  <div class="hint">Back camera • Blue wireframe • MediaPipe Hands</div>
 
-<script>
-(() => {
-  const HANDS_VERSION = '0.4.1675469240'; // pinned – keep this in sync with the scripts above
-  const HANDS_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/hands@${HANDS_VERSION}`;
+  <!-- MediaPipe libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
-  const log = (...a) => console.debug('[Hand]', ...a);
-  const warn = (...a) => console.warn('[Hand]', ...a);
-  const err  = (...a) => console.error('[Hand]', ...a);
+  <script>
+    (async () => {
+      const video  = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      const ctx    = canvas.getContext('2d', { alpha: false }); // opaque for performance
 
-  class MobileHandLite {
-    constructor() {
-      this.video  = document.getElementById('video');
-      this.canvas = document.getElementById('canvas');
-      this.ctx    = this.canvas.getContext('2d', { alpha:false, desynchronized:true });
-      this.status = document.getElementById('status');
+      // Prefer the back camera; gracefully fall back if needed.
+      async function getBackCameraStream() {
+        const attempts = [
+          { video: { facingMode: { exact: 'environment' } }, audio: false },
+          { video: { facingMode: 'environment' },           audio: false },
+          { video: true,                                    audio: false }
+        ];
+        for (const constraints of attempts) {
+          try {
+            return await navigator.mediaDevices.getUserMedia(constraints);
+          } catch (e) { /* try next */ }
+        }
+        throw new Error('No usable camera found.');
+      }
 
-      this.w = 0; this.h = 0; this.dpr = Math.min(2, window.devicePixelRatio || 1);
+      // Keep the canvas sized to the camera’s native resolution
+      function resizeToVideo() {
+        const w = video.videoWidth  || 1280;
+        const h = video.videoHeight || 720;
+        canvas.width  = w;
+        canvas.height = h;
+      }
+      window.addEventListener('resize', resizeToVideo);
 
-      this.latestLandmarks = null;
-      this.baseHandSize = 0;
-
-      this.setupCanvas();
-      this.setupResizeHandlers();
-      this.initHands();
-      this.initCamera().then(() => {
-        this.status.textContent = 'Hologram active';
-        this.loop();
+      // ---- MediaPipe Hands setup ----
+      const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
       });
-    }
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
 
-    setupResizeHandlers(){
-      const apply = () => this.setupCanvas();
-      window.addEventListener('resize', apply, { passive:true });
-      window.addEventListener('orientationchange', () => setTimeout(apply, 150), { passive:true });
-    }
+      hands.onResults((results) => {
+        // Black background
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    setupCanvas() {
-      this.w = Math.max(320, Math.min(window.innerWidth, 1280));
-      this.h = Math.max(240, Math.min(window.innerHeight, 1280));
-      this.dpr = Math.min(2, window.devicePixelRatio || 1);
+        // Blue wireframe
+        if (results.multiHandLandmarks) {
+          ctx.lineCap  = 'round';
+          ctx.lineJoin = 'round';
+          for (const landmarks of results.multiHandLandmarks) {
+            // Lines between joints
+            drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color: '#1e90ff', lineWidth: 3 });
+            // Joint points
+            drawLandmarks(ctx,  landmarks,                     { color: '#1e90ff', radius: 2 });
+          }
+        }
+        ctx.restore();
+      });
 
-      this.canvas.width  = Math.floor(this.w * this.dpr);
-      this.canvas.height = Math.floor(this.h * this.dpr);
-      this.canvas.style.width  = this.w + 'px';
-      this.canvas.style.height = this.h + 'px';
-
-      this.ctx.setTransform(1,0,0,1,0,0);
-      this.ctx.scale(this.dpr, this.dpr);
-
-      log('Canvas', { css:`${this.w}x${this.h}`, backing:`${this.canvas.width}x${this.canvas.height}`, dpr:this.dpr });
-    }
-
-    async initCamera(){
-      const constraints = {
-        video: {
-          facingMode: { ideal: 'environment' }, // back camera
-          width:  { ideal: 640 },
-          height: { ideal: 480 }
-        },
-        audio: false
-      };
-
+      // ---- Start camera and processing loop ----
       try {
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        this.video.srcObject = stream;
-        await this.video.play().catch(()=>{});
-        this.status.textContent = 'Camera ready (back)';
-        log('Camera ready', stream.getVideoTracks()[0]?.getSettings?.());
-      } catch (e1) {
-        warn('Back camera failed, trying any camera…', e1);
-        const fallback = { video: true, audio: false };
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia(fallback);
-          this.video.srcObject = stream;
-          await this.video.play().catch(()=>{});
-          this.status.textContent = 'Camera ready';
-          log('Camera fallback ready', stream.getVideoTracks()[0]?.getSettings?.());
-        } catch (e2) {
-          err('Camera error', e2);
-          this.status.textContent = 'Camera error';
-        }
-      }
-    }
-
-    initHands(){
-      // IMPORTANT: ensure assets load from the same pinned base path
-      this.hands = new Hands({
-        locateFile: (file) => `${HANDS_BASE}/${file}`
-      });
-
-      // Lean settings for speed
-      this.hands.setOptions({
-        selfieMode: false,
-        maxNumHands: 1,
-        modelComplexity: 0,
-        minDetectionConfidence: 0.6,
-        minTrackingConfidence: 0.6
-      });
-
-      // Log asset fetches (helps diagnose 404s/CORS)
-      const _fetch = window.fetch;
-      window.fetch = async (...args) => {
-        const res = await _fetch(...args);
-        if (!res.ok) {
-          console.error('[Hand] Asset fetch failed', { url: args[0], status: res.status });
-        } else {
-          // console.debug('[Hand] Asset loaded', args[0]);
-        }
-        return res;
-      };
-
-      this.hands.onResults((res) => {
-        const lm = res.multiHandLandmarks && res.multiHandLandmarks[0] ? res.multiHandLandmarks[0] : null;
-        this.latestLandmarks = lm;
-        if (!lm) return;
-        if (this.baseHandSize === 0) {
-          this.baseHandSize = this.handLength(lm);
-        }
-      });
-
-      this.camera = new Camera(this.video, {
-        onFrame: async () => { await this.hands.send({ image: this.video }); },
-        width:  640,
-        height: 480
-      });
-
-      this.camera.start()
-        .then(() => this.status.textContent = 'Tracking…')
-        .catch((e)=>err('Camera helper error', e));
-    }
-
-    handLength(landmarks){
-      const dx = (landmarks[12].x - landmarks[0].x) * this.w;
-      const dy = (landmarks[12].y - landmarks[0].y) * this.h;
-      return Math.hypot(dx, dy);
-    }
-
-    loop(){
-      const step = (t) => {
-        this.ctx.fillStyle = '#000';
-        this.ctx.fillRect(0,0,this.w,this.h);
-
-        this.drawScanlines(t);
-
-        if (this.latestLandmarks) {
-          this.drawHand(this.latestLandmarks, t);
-          this.status.textContent = 'Hand detected';
-        } else {
-          this.status.textContent = 'Show hand to camera';
-        }
-        requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-    }
-
-    drawScanlines(t){
-      const a = 0.05 + 0.03 * Math.sin(t*0.002);
-      this.ctx.globalAlpha = a;
-      this.ctx.fillStyle = '#0af';
-      const pitch = 4;
-      for (let y=0; y<this.h; y+=pitch) {
-        this.ctx.fillRect(0, y, this.w, 1);
-      }
-      this.ctx.globalAlpha = 1;
-    }
-
-    drawHand(landmarks, t){
-      const pts = landmarks.map(l => ({ x: l.x * this.w, y: l.y * this.h }));
-      const scale = Math.max(0.7, Math.min(1.6, this.handLength(landmarks) / Math.max(1, this.baseHandSize)));
-
-      const thick = 6 * scale;
-      const thin  = 2.2 * scale;
-
-      const CONN = [
-        [0,1],[1,2],[2,3],[3,4],
-        [0,5],[5,6],[6,7],[7,8],
-        [0,9],[9,10],[10,11],[11,12],
-        [0,13],[13,14],[14,15],[15,16],
-        [0,17],[17,18],[18,19],[19,20]
-      ];
-
-      const path = new Path2D();
-      for (const [a,b] of CONN) {
-        path.moveTo(pts[a].x, pts[a].y);
-        path.lineTo(pts[b].x, pts[b].y);
+        const stream = await getBackCameraStream();
+        video.srcObject = stream;
+        await video.play();
+      } catch (err) {
+        alert('Camera error: ' + err.message + '\nTip: Use a device with a back camera and open this page via HTTPS.');
+        return;
       }
 
-      this.ctx.lineCap = 'round';
-      this.ctx.lineJoin = 'round';
+      if (video.readyState >= 2) resizeToVideo();
+      else video.addEventListener('loadedmetadata', resizeToVideo);
 
-      // wide, faint glow
-      this.ctx.strokeStyle = 'rgba(0, 200, 255, 0.18)';
-      this.ctx.lineWidth = thick;
-      this.ctx.stroke(path);
-
-      // bright core
-      const flicker = 0.85 + 0.15 * Math.sin(t * 0.006);
-      this.ctx.strokeStyle = `rgba(120, 240, 255, ${flicker.toFixed(3)})`;
-      this.ctx.lineWidth = thin;
-      this.ctx.stroke(path);
-
-      // fingertip dots
-      this.ctx.fillStyle = 'rgba(120, 240, 255, 0.9)';
-      const TIPS = [4,8,12,16,20];
-      const r = 3.5 * scale;
-      for (const i of TIPS) {
-        this.ctx.beginPath();
-        this.ctx.arc(pts[i].x, pts[i].y, r, 0, Math.PI*2);
-        this.ctx.fill();
+      async function tick() {
+        if (video.readyState >= 2) {
+          await hands.send({ image: video });
+        }
+        requestAnimationFrame(tick);
       }
-    }
-  }
-
-  window.addEventListener('load', () => {
-    if (location.protocol === 'file:') {
-      console.warn('Serve this over http(s) – MediaPipe assets won’t load from file://');
-    }
-    new MobileHandLite();
-  });
-})();
-</script>
+      tick();
+    })();
+  </script>
 </body>
 </html>
