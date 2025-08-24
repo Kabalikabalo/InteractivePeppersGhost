@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Palm Polygon + Cylindrical Fingers + Fast Grab Circles (with Flip)</title>
+<title>Palm Polygon + Cylindrical Fingers + Fast Grab Circles (Flip & Mirror)</title>
 <style>
   html, body { height:100%; margin:0; background:#000; overflow:hidden; }
   /* We’ll size the canvas in JS to PRESERVE ASPECT RATIO (no stretching) */
@@ -57,10 +57,10 @@
 <body>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
-  <button id="flipBtn" class="flip-toggle" aria-pressed="false" title="Flip: turn the scene upside down">
+  <button id="flipBtn" class="flip-toggle" aria-pressed="false" title="Cycle through flip/mirror modes">
     Flip: Off <kbd>F</kbd>
   </button>
-  <div class="hint">Back camera • Palm polygon + cylindrical fingers • Pinch (thumb+index) to grab • Flip toggle (top-right)</div>
+  <div class="hint">Back camera • Palm polygon + cylindrical fingers • Pinch (thumb+index) to grab • Flip/Mirror cycle (top-right)</div>
   <div class="hud" id="hud"></div>
 
   <!-- MediaPipe -->
@@ -74,19 +74,31 @@
       const ctx    = canvas.getContext('2d', { alpha:false });
       const hud    = document.getElementById('hud');
 
-      // ---------- Flip (Upside-Down) Toggle ----------
+      // ---------- Flip / Mirror Mode ----------
+      // 0 = Off (normal)
+      // 1 = Upside-Down (vertical flip)
+      // 2 = Mirror (horizontal flip)
+      // 3 = Upside-Down + Mirror (both)
       const flipBtn = document.getElementById('flipBtn');
-      let flipEnabled = false;
+      let flipMode = 0;
 
-      function setFlipState(on){
-        flipEnabled = !!on;
-        flipBtn.classList.toggle('on', flipEnabled);
-        flipBtn.setAttribute('aria-pressed', String(flipEnabled));
-        flipBtn.innerHTML = `Flip: ${flipEnabled ? 'On' : 'Off'} <kbd>F</kbd>`;
+      const modeLabels = [
+        'Off',
+        'Upside-Down',
+        'Mirror',
+        'Upside-Down + Mirror'
+      ];
+
+      function setFlipMode(mode){
+        flipMode = ((mode % 4) + 4) % 4;
+        const on = flipMode !== 0;
+        flipBtn.classList.toggle('on', on);
+        flipBtn.setAttribute('aria-pressed', String(on));
+        flipBtn.innerHTML = `Flip: ${modeLabels[flipMode]} <kbd>F</kbd>`;
       }
-      flipBtn.addEventListener('click', () => setFlipState(!flipEnabled));
+      flipBtn.addEventListener('click', () => setFlipMode(flipMode + 1));
       window.addEventListener('keydown', (e) => {
-        if (e.key.toLowerCase() === 'f') { setFlipState(!flipEnabled); }
+        if (e.key.toLowerCase() === 'f') { setFlipMode(flipMode + 1); }
       });
 
       // ---------- utils ----------
@@ -440,7 +452,7 @@
 
         hud.textContent =
           (grabbedIndex >= 0 ? 'GRABBING • ' : '') +
-          `pinch ${pinch.active?'ON':'OFF'} • lead 50ms • flip ${flipEnabled?'ON':'OFF'}`;
+          `pinch ${pinch.active?'ON':'OFF'} • lead 50ms • view ${modeLabels[flipMode]}`;
         prevPinchActive = pinch.active;
       }
 
@@ -470,10 +482,23 @@
         ctx.fillStyle = '#000';
         ctx.fillRect(0,0,canvas.width,canvas.height);
 
-        // If flip is enabled, flip the entire scene upside down (180°)
-        if (flipEnabled){
+        // ----- Apply selected view transform -----
+        // 0: none
+        // 1: vertical flip (upside-down)
+        // 2: horizontal flip (mirror)
+        // 3: both (vertical + horizontal) = 180° rotate
+        if (flipMode === 1){
+          // Upside-Down (flip Y)
+          ctx.translate(0, canvas.height);
+          ctx.scale(1, -1);
+        } else if (flipMode === 2){
+          // Mirror (flip X)
+          ctx.translate(canvas.width, 0);
+          ctx.scale(-1, 1);
+        } else if (flipMode === 3){
+          // Both (flip X and Y)
           ctx.translate(canvas.width, canvas.height);
-          ctx.rotate(Math.PI);
+          ctx.scale(-1, -1);
         }
 
         let finger = prevFinger || {x:canvas.width/2, y:canvas.height/2};
@@ -572,6 +597,9 @@
         requestAnimationFrame(tick);
       }
       tick();
+
+      // initialize button text on load
+      setFlipMode(flipMode);
     })();
   </script>
 </body>
