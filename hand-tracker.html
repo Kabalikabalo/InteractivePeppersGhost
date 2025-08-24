@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Palm Polygon + Cylindrical Fingers + Fast Grab Circles</title>
+<title>Palm Polygon + Cylindrical Fingers + Fast Grab Circles (with Flip)</title>
 <style>
   html, body { height:100%; margin:0; background:#000; overflow:hidden; }
   /* We’ll size the canvas in JS to PRESERVE ASPECT RATIO (no stretching) */
@@ -25,12 +25,42 @@
     opacity:.95; user-select:none; pointer-events:none;
     text-align:right;
   }
+
+  /* Flip (mirror) toggle button — top-right corner */
+  .flip-toggle{
+    position:fixed; top:12px; right:12px;
+    padding:8px 10px;
+    font:12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    color:#e9f3ff; background:rgba(17,30,53,.6);
+    border:1px solid rgba(80,150,255,.5);
+    border-radius:8px;
+    cursor:pointer; user-select:none;
+    box-shadow:0 0 12px rgba(57,168,255,.35) inset, 0 0 10px rgba(57,168,255,.25);
+    backdrop-filter: blur(6px);
+    transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+  }
+  .flip-toggle:hover{ transform: translateY(-1px); }
+  .flip-toggle:active{ transform: translateY(0); }
+  .flip-toggle.on{
+    background:rgba(34,70,130,.65);
+    box-shadow:0 0 16px rgba(80,170,255,.5) inset, 0 0 10px rgba(80,170,255,.35);
+    border-color: rgba(120,190,255,.9);
+  }
+  .flip-toggle kbd{
+    padding:2px 5px; border-radius:4px;
+    background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.15);
+    font:11px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color:#cfe6ff; margin-left:6px;
+  }
 </style>
 </head>
 <body>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
-  <div class="hint">Back camera • Palm polygon + cylindrical fingers • Pinch (thumb+index) to grab</div>
+  <button id="flipBtn" class="flip-toggle" aria-pressed="false" title="Flip: turn the scene upside down">
+    Flip: Off <kbd>F</kbd>
+  </button>
+  <div class="hint">Back camera • Palm polygon + cylindrical fingers • Pinch (thumb+index) to grab • Flip toggle (top-right)</div>
   <div class="hud" id="hud"></div>
 
   <!-- MediaPipe -->
@@ -43,6 +73,21 @@
       const canvas = document.getElementById('canvas');
       const ctx    = canvas.getContext('2d', { alpha:false });
       const hud    = document.getElementById('hud');
+
+      // ---------- Flip (Upside-Down) Toggle ----------
+      const flipBtn = document.getElementById('flipBtn');
+      let flipEnabled = false;
+
+      function setFlipState(on){
+        flipEnabled = !!on;
+        flipBtn.classList.toggle('on', flipEnabled);
+        flipBtn.setAttribute('aria-pressed', String(flipEnabled));
+        flipBtn.innerHTML = `Flip: ${flipEnabled ? 'On' : 'Off'} <kbd>F</kbd>`;
+      }
+      flipBtn.addEventListener('click', () => setFlipState(!flipEnabled));
+      window.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 'f') { setFlipState(!flipEnabled); }
+      });
 
       // ---------- utils ----------
       const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -395,7 +440,7 @@
 
         hud.textContent =
           (grabbedIndex >= 0 ? 'GRABBING • ' : '') +
-          `pinch ${pinch.active?'ON':'OFF'} • lead ${Math.round(leadTime*1000)}ms`;
+          `pinch ${pinch.active?'ON':'OFF'} • lead 50ms • flip ${flipEnabled?'ON':'OFF'}`;
         prevPinchActive = pinch.active;
       }
 
@@ -418,12 +463,18 @@
         let steps = Math.max(1, Math.min(4, Math.ceil(dt / STEP)));
         const subdt = dt / steps;
 
-        // Clear
+        // Clear (reset transform while clearing)
         ctx.save();
         ctx.setTransform(1,0,0,1,0,0);
         ctx.clearRect(0,0,canvas.width,canvas.height);
         ctx.fillStyle = '#000';
         ctx.fillRect(0,0,canvas.width,canvas.height);
+
+        // If flip is enabled, flip the entire scene upside down (180°)
+        if (flipEnabled){
+          ctx.translate(canvas.width, canvas.height);
+          ctx.rotate(Math.PI);
+        }
 
         let finger = prevFinger || {x:canvas.width/2, y:canvas.height/2};
         let pinchActive = false;
