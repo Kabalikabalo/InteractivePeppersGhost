@@ -2,21 +2,23 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Face → Servo (micro:bit)</title>
+  <title>Face → Servo (with logging)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     html,body{height:100%;margin:0}
     body{display:grid;place-items:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:16px}
-    .wrap{display:flex;flex-direction:column;gap:12px;max-width:700px;width:100%}
+    .wrap{display:flex;flex-direction:column;gap:12px;max-width:800px;width:100%}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     button,input,select,label{font-size:1rem}
-    #status{font-family:ui-monospace,Menlo,Consolas,monospace;color:#444;white-space:pre-line}
+    #status{font-family:ui-monospace,Menlo,Consolas,monospace;color:#333;white-space:pre-line}
+    #last{font-family:ui-monospace,Menlo,Consolas,monospace;color:#111}
+    #log{border:1px solid #ddd;border-radius:8px;padding:10px;height:180px;overflow:auto;background:#fafafa;font-family:ui-monospace,monospace;font-size:.95rem}
     video{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Face → Servo (micro:bit)</h1>
+    <h1>Face → Servo (micro:bit) — with Logging</h1>
 
     <div class="row">
       <button id="startCam">Start Camera</button>
@@ -26,7 +28,7 @@
       <label>Tracking
         <select id="mode">
           <option value="on" selected>On</option>
-          <option value="hold">Hold (don't send)</option>
+          <option value="hold">Hold (don’t send)</option>
         </select>
       </label>
     </div>
@@ -44,15 +46,22 @@
         <input id="smooth" type="range" min="0" max="95" value="70" />
         <span id="smoothVal">0.70</span>
       </label>
+      <label>Min <input id="amin" type="number" value="30" min="0" max="180" style="width:80px"></label>
+      <label>Max <input id="amax" type="number" value="150" min="0" max="180" style="width:80px"></label>
+      <label>Send every <input id="rate" type="number" value="100" min="40" max="1000" style="width:80px"> ms</label>
     </div>
 
     <div class="row">
-      <label>Min <input id="amin" type="number" value="30" min="0" max="180" style="width:80px"></label>
-      <label>Max <input id="amax" type="number" value="150" min="0" max="180" style="width:80px"></label>
-      <label>Send every <input id="rate" type="number" value="1000" min="40" max="500" style="width:80px"> ms</label>
+      <label>Manual angle <input id="manualAngle" type="number" min="0" max="180" value="90" style="width:80px"></label>
+      <button id="sendManual">Send now</button>
+      <button id="clearLog">Clear log</button>
     </div>
 
+    <div id="last">Last event: (none)</div>
     <pre id="status">Ready.</pre>
+    <div id="log"></div>
+
+    <!-- hidden camera feed -->
     <video id="video" autoplay playsinline muted></video>
   </div>
 
@@ -60,7 +69,7 @@
   <script type="module">
     import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
 
-    // --- UI elements
+    // --- UI refs
     const video = document.getElementById('video');
     const startCamBtn = document.getElementById('startCam');
     const connectBtBtn = document.getElementById('connectBt');
@@ -73,19 +82,33 @@
     const minInput = document.getElementById('amin'); const maxInput = document.getElementById('amax');
     const rateInput = document.getElementById('rate');
     const statusEl = document.getElementById('status');
+    const lastEl = document.getElementById('last');
+    const logEl = document.getElementById('log');
+    const manualAngle = document.getElementById('manualAngle');
+    const sendManualBtn = document.getElementById('sendManual');
+    const clearLogBtn = document.getElementById('clearLog');
 
-    const log = (...a)=>{ statusEl.textContent = a.join(' ') + "\\n" + statusEl.textContent.split("\\n").slice(0,8).join("\\n"); };
+    // --- helpers
     const clamp = (n, lo, hi)=>Math.max(lo, Math.min(hi, n));
+    const nowStr = ()=> new Date().toLocaleTimeString();
+    const logLines = [];
+    function addLog(line){
+      const s = `[${nowStr()}] ${line}`;
+      logLines.push(s); if (logLines.length>300) logLines.shift();
+      logEl.textContent = logLines.join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function setLast(text){ lastEl.textContent = `Last event: ${text}`; }
+    const logStatus = (...a)=>{ statusEl.textContent = a.join(' ') + "\n" + statusEl.textContent.split("\n").slice(0,8).join("\n"); };
 
     // reflect sliders
     gainInput.oninput = ()=> gainVal.textContent = gainInput.value;
     deadInput.oninput = ()=> deadVal.textContent = deadInput.value + '%';
     smoothInput.oninput = ()=> smoothVal.textContent = (Number(smoothInput.value)/100).toFixed(2);
 
-    // --- Face tracking
+    // --- Face tracking → angle
     let landmarker = null, running = false;
-    let emaX = 0;           // smoothed horizontal offset (-1 .. +1)
-    let neutral = 0;        // recenter offset
+    let emaX = 0, neutral = 0;       // normalized x tracking
 
     startCamBtn.onclick = async()=>{
       try{
@@ -97,8 +120,8 @@
         const fileset = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
         );
-        // if your network blocks GCS, download this file next to your page and change to "./face_landmarker.task"
-        const modelAssetPath = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+        const modelAssetPath =
+          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 
         landmarker = await FaceLandmarker.createFromOptions(fileset, {
           baseOptions: { modelAssetPath },
@@ -108,55 +131,48 @@
 
         running = true;
         requestAnimationFrame(loop);
-        log("Camera+Landmarker running…");
+        logStatus("Camera+Landmarker running…");
       }catch(e){ alert(e.message || e); }
     };
 
     function faceToAngle(xNorm){
-      // xNorm: -1 (left) .. +1 (right) — from landmarks average
+      // xNorm: -1 .. +1 (left..right)
       const k = Number(smoothInput.value)/100; // 0..0.95
       emaX = (1-k)*xNorm + k*emaX;
 
       const err = (emaX - neutral) * (invertChk.checked ? -1 : 1);
       const dead = Number(deadInput.value)/100;
-      const mag = Math.max(0, Math.abs(err) - dead) / (1 - dead); // 0..1 after dead-zone
+      const mag = Math.max(0, Math.abs(err) - dead) / (1 - dead);
       const signed = Math.sign(err) * mag;
 
-      const gain = Number(gainInput.value);      // degrees from center at full deflection
+      const gain = Number(gainInput.value);
       const minA = Number(minInput.value);
       const maxA = Number(maxInput.value);
-      const angle = clamp(Math.round(90 + signed * gain), minA, maxA);
-      return angle;
+      return clamp(Math.round(90 + signed * gain), minA, maxA);
     }
 
+    let currentAngle = 90; // for logs
     async function loop(){
       if (!running) return;
       try{
         const res = landmarker.detectForVideo(video, performance.now());
         if (res?.faceLandmarks?.length){
-          // average x of all landmarks gives a robust face center
           const l = res.faceLandmarks[0];
-          let x=0; for (let i=0;i<l.length;i++) x += l[i].x; x /= l.length;  // 0..1
-          const xNorm = (x - 0.5)*2; // -1..+1
-          const angle = faceToAngle(xNorm);
-          if (modeSel.value === 'on') sendAngle(angle);
-          uiAngle(angle);
-        }else{
-          // no face: relax toward center and don't spam writes
-          emaX *= 0.98;
+          let x=0; for (let i=0;i<l.length;i++) x += l[i].x; x/=l.length;
+          currentAngle = faceToAngle((x-0.5)*2);
+          if (modeSel.value === 'on') sendAngle(currentAngle, {reason:'auto'});
+          statusEl.textContent = `tracking=${modeSel.value}  angle=${currentAngle}°  invert=${invertChk.checked}`;
+        } else {
+          emaX *= 0.98; // relax toward center slowly
+          statusEl.textContent = `no face  tracking=${modeSel.value}`;
         }
-      }catch(e){ /* ignore transient */ }
+      }catch{}
       requestAnimationFrame(loop);
     }
 
-    function uiAngle(a){
-      // quick little status line
-      statusEl.textContent = `angle ${a}°, tracking=${modeSel.value}, invert=${invertChk.checked}`;
-    }
+    centerBtn.onclick = ()=>{ neutral = emaX; lastSentAngle = null; sendAngle(90, {reason:'center', force:true}); };
 
-    centerBtn.onclick = ()=>{ neutral = emaX; lastSentAngle = null; sendAngle(90); };
-
-    // --- Bluetooth (Nordic UART on micro:bit)
+    // --- Bluetooth (NUS)
     const NUS_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
     let device=null, server=null, writableChar=null;
     let lastSentAngle = null;
@@ -168,7 +184,9 @@
           filters: [{ namePrefix:'BBC micro:bit' }, { namePrefix:'micro:bit' }],
           optionalServices: [NUS_UUID]
         });
-        device.addEventListener('gattserverdisconnected', ()=>{ writableChar=null; log('BT: disconnected'); });
+        device.addEventListener('gattserverdisconnected', ()=>{
+          writableChar=null; addLog('BT: disconnected');
+        });
         server = await device.gatt.connect();
         const svc = await server.getPrimaryService(NUS_UUID);
         const chars = await svc.getCharacteristics();
@@ -177,29 +195,66 @@
           const dump = await Promise.all(chars.map(async c=>{
             const p=c.properties; return `${c.uuid} -> write:${!!p.write} wwr:${!!p.writeWithoutResponse}`;
           }));
-          throw new Error('No writable char in NUS:\\n'+dump.join('\\n'));
+          throw new Error('No writable char in NUS:\n'+dump.join('\n'));
         }
-        log('BT: connected (char '+writableChar.uuid+')');
+        addLog('BT: connected (char '+writableChar.uuid+')');
       }catch(e){ alert(e.message || e); }
     };
 
-    async function sendAngle(angle){
-      if (!writableChar || !device?.gatt?.connected) return;
-      if (lastSentAngle !== null && Math.abs(angle - lastSentAngle) < 1) return; // ignore tiny changes
-      const now = performance.now();
-      const interval = clamp(Number(rateInput.value)|0, 40, 500);
-      if (now - lastWriteTs < interval) return;  // throttle writes
-      lastWriteTs = now;
+    sendManualBtn.onclick = ()=> {
+      const a = clamp(Number(manualAngle.value)|0, 0, 180);
+      manualAngle.value = String(a);
+      sendAngle(a, {force:true, reason:'manual'});
+    };
+    clearLogBtn.onclick = ()=>{ logLines.length=0; logEl.textContent=''; setLast('(none)'); };
 
-      const payload = new TextEncoder().encode(String(angle) + "\\n");
+    // --- sending + instrumentation
+    let periodAttempts = 0, periodSent = 0, periodSkipped = 0, lastReason = '(none)';
+    function snapshotLog(){
+      const connected = !!(device?.gatt?.connected);
+      addLog(`snapshot: connected=${connected} wanted=${currentAngle}°  lastSent=${lastSentAngle ?? '—'}  lastReason=${lastReason}  rate=${rateInput.value}ms  sent=${periodSent} skipped=${periodSkipped} attempts=${periodAttempts}`);
+      periodAttempts = periodSent = periodSkipped = 0;
+    }
+    setInterval(snapshotLog, 1000); // <-- log every 1000ms
+
+    async function sendAngle(angle, {force=false, reason='auto'} = {}){
+      periodAttempts++;
+      if (!writableChar || !device?.gatt?.connected){
+        periodSkipped++; lastReason = 'skip: not connected';
+        setLast(`SKIP (not connected) angle=${angle}° [${reason}]`);
+        return;
+      }
+
+      const now = performance.now();
+      const interval = clamp(Number(rateInput.value)|0, 40, 1000);
+      if (!force && now - lastWriteTs < interval){
+        periodSkipped++; lastReason = 'skip: throttle';
+        setLast(`SKIP (throttle) angle=${angle}° [${reason}]`);
+        return;
+      }
+      if (!force && lastSentAngle !== null && Math.abs(angle - lastSentAngle) < 1){
+        periodSkipped++; lastReason = 'skip: unchanged';
+        setLast(`SKIP (unchanged) angle=${angle}° [${reason}]`);
+        return;
+      }
+
+      const payload = new TextEncoder().encode(String(angle) + "\n");
       try{
         if (writableChar.properties.writeWithoutResponse && writableChar.writeValueWithoutResponse){
           await writableChar.writeValueWithoutResponse(payload);
         } else {
           await writableChar.writeValue(payload);
         }
+        lastWriteTs = now;
         lastSentAngle = angle;
-      }catch(e){ log('BT write error: '+(e.message||e)); }
+        periodSent++; lastReason = 'sent';
+        const msg = `SENT angle=${angle}° [${reason}]`;
+        setLast(msg); addLog(msg);
+      }catch(e){
+        periodSkipped++; lastReason = `error: ${e.message||e}`;
+        const msg = `ERROR sending angle=${angle}° → ${e.message||e}`;
+        setLast(msg); addLog(msg);
+      }
     }
   </script>
 </body>
