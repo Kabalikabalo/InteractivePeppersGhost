@@ -2,40 +2,143 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>micro:bit — Type Angle & Turn</title>
+  <title>Face → Servo (simple, 1s updates)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, sans-serif; margin: 16px; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
     input, button { font-size: 1rem; }
-    #status { font-family: ui-monospace, Menlo, Consolas, monospace; margin-top: 10px; }
+    #angleOut, #status { font-family: ui-monospace, Menlo, Consolas, monospace; }
+    video { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
   </style>
 </head>
 <body>
-  <h1>Type Angle → Servo</h1>
+  <h1>Face → Servo (simple)</h1>
 
   <div class="row">
-    <button id="connect">Connect micro:bit</button>
-    <label>Angle
-      <input id="angle" type="number" min="0" max="180" value="90" style="width:90px" />
-    </label>
-    <button id="send">Send</button>
+    <button id="startCam">Start Camera</button>
+    <button id="connectBt">Connect micro:bit</button>
   </div>
 
-  <div id="status">Not connected.</div>
+  <div class="row">
+    <strong>Auto angle (every 1000 ms):</strong> <span id="angleOut">--</span>°
+  </div>
 
-  <script>
-    const NUS_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e'; // Nordic UART Service
+  <div class="row">
+    <label>Manual angle
+      <input id="manual" type="number" min="0" max="180" value="90" style="width:80px" />
+    </label>
+    <button id="sendManual">Send</button>
+  </div>
 
+  <div id="status">Ready.</div>
+
+  <!-- Hidden camera element -->
+  <video id="video" autoplay playsinline muted></video>
+
+  <!-- MediaPipe Tasks Vision (ES Modules) -->
+  <script type="module">
+    import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
+
+    // --- UI refs
+    const startCamBtn = document.getElementById('startCam');
+    const connectBtBtn = document.getElementById('connectBt');
+    const angleOut = document.getElementById('angleOut');
+    const manual = document.getElementById('manual');
+    const sendManualBtn = document.getElementById('sendManual');
+    const statusEl = document.getElementById('status');
+    const video = document.getElementById('video');
+
+    const setStatus = s => statusEl.textContent = s;
+    const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+
+    // --- Face tracking (no UI controls, just fixed params)
+    let landmarker = null;
+    let running = false;
+    let haveFace = false;
+    let emaX = 0;                // smoothed x offset (-1..+1)
+    const SMOOTH_K = 0.7;        // fixed smoothing
+    const DEAD = 0.06;           // fixed dead-zone (~6% of width)
+    const GAIN_DEG = 60;         // ±60° around center at full deflection
+    const MIN_ANGLE = 30, MAX_ANGLE = 150;
+
+    let latestAngle = 90;
+
+    startCamBtn.onclick = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        const fileset = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+        );
+        const modelAssetPath =
+          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+        landmarker = await FaceLandmarker.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath },
+          runningMode: "VIDEO",
+          numFaces: 1
+        });
+
+        running = true;
+        requestAnimationFrame(loop);
+        setStatus('Camera + Landmarker running…');
+      } catch (e) {
+        alert(e.message || e);
+      }
+    };
+
+    function computeAngleFromX(xNorm) {
+      // xNorm: -1 (left) .. +1 (right)
+      emaX = (1 - SMOOTH_K) * xNorm + SMOOTH_K * emaX;
+
+      // Apply dead-zone
+      const err = emaX;
+      const mag = Math.max(0, Math.abs(err) - DEAD) / (1 - DEAD); // 0..1
+      const signed = Math.sign(err) * mag;
+
+      // Map to angle around 90°
+      const angle = clamp(Math.round(90 + signed * GAIN_DEG), MIN_ANGLE, MAX_ANGLE);
+      return angle;
+    }
+
+    async function loop() {
+      if (!running) return;
+      try {
+        const res = landmarker.detectForVideo(video, performance.now());
+        if (res?.faceLandmarks?.length) {
+          const l = res.faceLandmarks[0];
+          let x = 0; for (let i = 0; i < l.length; i++) x += l[i].x; x /= l.length; // 0..1
+          const xNorm = (x - 0.5) * 2; // -1..+1
+          latestAngle = computeAngleFromX(xNorm);
+          haveFace = true;
+        } else {
+          haveFace = false;
+          // gently relax toward center
+          emaX *= 0.98;
+          latestAngle = 90;
+        }
+      } catch { /* ignore transient */ }
+      requestAnimationFrame(loop);
+    }
+
+    // --- Update display + auto-send every 1000 ms
+    setInterval(() => {
+      angleOut.textContent = String(latestAngle);
+      if (haveFace) sendAngle(latestAngle, /*force*/false);
+      else setStatus('No face — not sending.');
+    }, 1000);
+
+    // --- Bluetooth (Nordic UART, writable char auto-detected)
+    const NUS_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
     let device = null, server = null, writableChar = null;
 
-    const angleInput = document.getElementById('angle');
-    const statusEl   = document.getElementById('status');
-
-    const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-    const setStatus = s => statusEl.textContent = s;
-
-    document.getElementById('connect').addEventListener('click', async () => {
+    connectBtBtn.onclick = async () => {
       if (!('bluetooth' in navigator)) { alert('Web Bluetooth not supported'); return; }
       try {
         device = await navigator.bluetooth.requestDevice({
@@ -43,7 +146,7 @@
           optionalServices: [NUS_UUID]
         });
         device.addEventListener('gattserverdisconnected', () => {
-          writableChar = null; setStatus('Disconnected.');
+          writableChar = null; setStatus('Bluetooth: disconnected.');
         });
         server = await device.gatt.connect();
         const svc = await server.getPrimaryService(NUS_UUID);
@@ -55,36 +158,45 @@
           }));
           throw new Error('No writable UART characteristic:\n' + dump.join('\n'));
         }
-        setStatus('Connected. Ready to send.');
+        setStatus('Bluetooth: connected. Auto-sending every 1000 ms when a face is seen.');
       } catch (e) {
-        alert(e.message || e); setStatus('Connect error: ' + (e.message || e));
+        alert(e.message || e);
+        setStatus('Connect error: ' + (e.message || e));
       }
-    });
+    };
 
-    async function sendAngle(angle) {
+    async function sendAngle(angle, force=false) {
       if (!writableChar || !device?.gatt?.connected) {
-        setStatus('Not connected.'); return;
+        setStatus('Not connected — cannot send.');
+        return;
       }
-      const a = clamp(Number(angle)|0, 0, 180);
-      angleInput.value = String(a);
-      const data = new TextEncoder().encode(a + "\n");
+      // Optional: tiny dedupe if not forced (keeps traffic light)
+      if (!force && sendAngle._last === angle) {
+        setStatus('Angle unchanged — skipping send.');
+        return;
+      }
+      const data = new TextEncoder().encode(String(clamp(angle, 0, 180)) + "\n");
       try {
         if (writableChar.properties.writeWithoutResponse && writableChar.writeValueWithoutResponse) {
           await writableChar.writeValueWithoutResponse(data);
         } else {
           await writableChar.writeValue(data);
         }
-        setStatus('Sent: ' + a + '°');
+        sendAngle._last = angle;
+        setStatus('Sent angle: ' + angle + '°');
       } catch (e) {
         setStatus('Send error: ' + (e.message || e));
         console.error(e);
       }
     }
 
-    document.getElementById('send').addEventListener('click', () => sendAngle(angleInput.value));
-    angleInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendAngle(angleInput.value);
-    });
+    // Manual send
+    sendManualBtn.onclick = () => {
+      const a = clamp(Number(manual.value) | 0, 0, 180);
+      manual.value = String(a);
+      sendAngle(a, /*force*/true);
+    };
+    manual.addEventListener('keydown', e => { if (e.key === 'Enter') sendManualBtn.click(); });
   </script>
 </body>
 </html>
