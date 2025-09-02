@@ -2,35 +2,40 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Face Center Arrow</title>
+  <title>Face → Servo (micro:bit)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { --fg: #111; --muted:#666; --ok:#0a0; --warn:#c70; }
-    html,body { height:100%; margin:0; }
-    body { display:grid; place-items:center; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-    .wrap { display:flex; flex-direction:column; align-items:center; gap:10px; padding:20px; }
-    h1 { margin:0 0 6px; font-size:1.2rem; color:var(--fg); }
-    .row { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; align-items:center; }
-    button, input { font-size:1rem; }
-    #arrow {
-      font-size: 96px; line-height:1; user-select:none;
-      transition: transform .08s linear, color .15s ease, opacity .15s ease;
-      color: var(--fg);
-    }
-    #arrow.dim { opacity:.35; color: var(--muted); }
-    #status { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); text-align:center; }
-    #hint { font-size:.9rem; color:var(--muted); }
-    /* we keep the video hidden; FaceDetector still reads from it */
-    video { position:absolute; opacity:0; width:1px; height:1px; pointer-events:none; }
+    html,body{height:100%;margin:0}
+    body{display:grid;place-items:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:16px}
+    .wrap{display:flex;flex-direction:column;gap:12px;max-width:700px;width:100%}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    button,input,select,label{font-size:1rem}
+    #status{font-family:ui-monospace,Menlo,Consolas,monospace;color:#444;white-space:pre-line}
+    video{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Face Center Arrow</h1>
+    <h1>Face → Servo (micro:bit)</h1>
 
     <div class="row">
-      <button id="start">Start</button>
-      <button id="center">Re-center</button>
+      <button id="startCam">Start Camera</button>
+      <button id="connectBt">Connect micro:bit</button>
+      <button id="centerBtn">Center (90°)</button>
+      <label><input type="checkbox" id="invertChk"> Invert direction</label>
+      <label>Tracking
+        <select id="mode">
+          <option value="on" selected>On</option>
+          <option value="hold">Hold (don't send)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row">
+      <label>Gain
+        <input id="gain" type="range" min="10" max="90" value="60" />
+        <span id="gainVal">60</span>°
+      </label>
       <label>Dead-zone
         <input id="dead" type="range" min="1" max="20" value="6" />
         <span id="deadVal">6%</span>
@@ -41,117 +46,160 @@
       </label>
     </div>
 
-    <div id="arrow" class="dim">⌖</div>
-    <div id="status">ready.</div>
-    <div id="hint">start → look at the phone → follow the arrow until “centered”.</div>
+    <div class="row">
+      <label>Min <input id="amin" type="number" value="30" min="0" max="180" style="width:80px"></label>
+      <label>Max <input id="amax" type="number" value="150" min="0" max="180" style="width:80px"></label>
+      <label>Send every <input id="rate" type="number" value="100" min="40" max="500" style="width:80px"> ms</label>
+    </div>
 
+    <pre id="status">Ready.</pre>
     <video id="video" autoplay playsinline muted></video>
   </div>
 
-  <script>
+  <!-- ES modules version of MediaPipe Tasks Vision -->
+  <script type="module">
+    import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
+
+    // --- UI elements
     const video = document.getElementById('video');
-    const startBtn = document.getElementById('start');
-    const centerBtn = document.getElementById('center');
-    const arrowEl = document.getElementById('arrow');
+    const startCamBtn = document.getElementById('startCam');
+    const connectBtBtn = document.getElementById('connectBt');
+    const centerBtn = document.getElementById('centerBtn');
+    const invertChk = document.getElementById('invertChk');
+    const modeSel = document.getElementById('mode');
+    const gainInput = document.getElementById('gain'); const gainVal = document.getElementById('gainVal');
+    const deadInput = document.getElementById('dead'); const deadVal = document.getElementById('deadVal');
+    const smoothInput = document.getElementById('smooth'); const smoothVal = document.getElementById('smoothVal');
+    const minInput = document.getElementById('amin'); const maxInput = document.getElementById('amax');
+    const rateInput = document.getElementById('rate');
     const statusEl = document.getElementById('status');
-    const deadInput = document.getElementById('dead');
-    const deadVal = document.getElementById('deadVal');
-    const smoothInput = document.getElementById('smooth');
-    const smoothVal = document.getElementById('smoothVal');
 
-    let detector = null;
-    let neutral = 0;         // neutral offset (xNorm) after recentering
-    let emaX = 0;            // smoothed x offset (-1..+1)
-    let running = false;
+    const log = (...a)=>{ statusEl.textContent = a.join(' ') + "\\n" + statusEl.textContent.split("\\n").slice(0,8).join("\\n"); };
+    const clamp = (n, lo, hi)=>Math.max(lo, Math.min(hi, n));
 
-    function log(s){ statusEl.textContent = s; }
-    function clamp(n, lo, hi){ return Math.max(lo, Math.min(hi, n)); }
+    // reflect sliders
+    gainInput.oninput = ()=> gainVal.textContent = gainInput.value;
+    deadInput.oninput = ()=> deadVal.textContent = deadInput.value + '%';
+    smoothInput.oninput = ()=> smoothVal.textContent = (Number(smoothInput.value)/100).toFixed(2);
 
-    deadInput.oninput = () => deadVal.textContent = deadInput.value + '%';
-    smoothInput.oninput = () => smoothVal.textContent = (Number(smoothInput.value)/100).toFixed(2);
+    // --- Face tracking
+    let landmarker = null, running = false;
+    let emaX = 0;           // smoothed horizontal offset (-1 .. +1)
+    let neutral = 0;        // recenter offset
 
-    centerBtn.onclick = () => { neutral = emaX; log('re-centered'); };
-
-    startBtn.onclick = async () => {
-      if (!('FaceDetector' in window)) {
-        alert('FaceDetector API not available in this browser. Try Chrome/Edge. (I can add a TF.js fallback if you want.)');
-        return;
-      }
-      try {
-        // front camera; we hide the element, but it must be playing
+    startCamBtn.onclick = async()=>{
+      try{
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: false
+          video:{facingMode:'user', width:{ideal:1280}, height:{ideal:720}}, audio:false
         });
-        video.srcObject = stream;
-        await video.play();
+        video.srcObject = stream; await video.play();
 
-        detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+        const fileset = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
+        );
+        // if your network blocks GCS, download this file next to your page and change to "./face_landmarker.task"
+        const modelAssetPath = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+        landmarker = await FaceLandmarker.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath },
+          runningMode: "VIDEO",
+          numFaces: 1
+        });
+
         running = true;
         requestAnimationFrame(loop);
-        log('running…');
-      } catch (e) {
-        console.error(e);
-        alert(e.message || e);
-      }
+        log("Camera+Landmarker running…");
+      }catch(e){ alert(e.message || e); }
     };
 
-    function setArrow(dir/* -1 left, 0 center, +1 right */, strength/*0..1*/) {
-      if (Math.abs(dir) < 0.01 && strength < 0.05) {
-        arrowEl.textContent = '✔';          // centered
-        arrowEl.classList.add('dim');
-        arrowEl.style.transform = 'scale(1)';
-        arrowEl.style.color = 'var(--ok)';
-        log('centered');
-        return;
-      }
-      arrowEl.classList.remove('dim');
-      arrowEl.style.color = 'var(--fg)';
-      // choose glyph
-      arrowEl.textContent = dir < 0 ? '←' : '→';
-      // scale with strength for an intuitive “how much”
-      const s = 1 + 1.2 * clamp(strength, 0, 1);
-      arrowEl.style.transform = `scale(${s})`;
-      log((dir < 0 ? 'turn left ' : 'turn right ') + Math.round(strength * 100) + '%');
+    function faceToAngle(xNorm){
+      // xNorm: -1 (left) .. +1 (right) — from landmarks average
+      const k = Number(smoothInput.value)/100; // 0..0.95
+      emaX = (1-k)*xNorm + k*emaX;
+
+      const err = (emaX - neutral) * (invertChk.checked ? -1 : 1);
+      const dead = Number(deadInput.value)/100;
+      const mag = Math.max(0, Math.abs(err) - dead) / (1 - dead); // 0..1 after dead-zone
+      const signed = Math.sign(err) * mag;
+
+      const gain = Number(gainInput.value);      // degrees from center at full deflection
+      const minA = Number(minInput.value);
+      const maxA = Number(maxInput.value);
+      const angle = clamp(Math.round(90 + signed * gain), minA, maxA);
+      return angle;
     }
 
-    async function loop() {
+    async function loop(){
       if (!running) return;
-
-      try {
-        const faces = await detector.detect(video);
-        if (faces && faces.length) {
-          const bb = faces[0].boundingBox;
-          const cx = bb.x + bb.width/2;
-          const w = video.videoWidth || 640;
-          // normalize face center: left=-1, center=0, right=+1
-          let xNorm = ((cx / w) - 0.5) * 2;
-
-          // smoothing (EMA)
-          const k = Number(smoothInput.value)/100; // 0..0.95
-          emaX = (1 - k) * xNorm + k * emaX;
-
-          // apply user neutral (recenter)
-          const err = emaX - neutral;
-
-          const dead = Number(deadInput.value) / 100; // dead-zone in normalized units
-          const mag = Math.max(0, Math.abs(err) - dead) / (1 - dead); // 0..1 after dead-zone
-          const dir = Math.sign(err);
-
-          setArrow(dir, mag);
-        } else {
-          arrowEl.textContent = '⌖'; // aim/idle
-          arrowEl.classList.add('dim');
-          arrowEl.style.transform = 'scale(1)';
-          arrowEl.style.color = 'var(--muted)';
-          log('no face');
-          // slowly relax toward center to avoid drift
+      try{
+        const res = landmarker.detectForVideo(video, performance.now());
+        if (res?.faceLandmarks?.length){
+          // average x of all landmarks gives a robust face center
+          const l = res.faceLandmarks[0];
+          let x=0; for (let i=0;i<l.length;i++) x += l[i].x; x /= l.length;  // 0..1
+          const xNorm = (x - 0.5)*2; // -1..+1
+          const angle = faceToAngle(xNorm);
+          if (modeSel.value === 'on') sendAngle(angle);
+          uiAngle(angle);
+        }else{
+          // no face: relax toward center and don't spam writes
           emaX *= 0.98;
         }
-      } catch (e) {
-        // ignore transient detector errors
-      }
+      }catch(e){ /* ignore transient */ }
       requestAnimationFrame(loop);
+    }
+
+    function uiAngle(a){
+      // quick little status line
+      statusEl.textContent = `angle ${a}°, tracking=${modeSel.value}, invert=${invertChk.checked}`;
+    }
+
+    centerBtn.onclick = ()=>{ neutral = emaX; lastSentAngle = null; sendAngle(90); };
+
+    // --- Bluetooth (Nordic UART on micro:bit)
+    const NUS_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    let device=null, server=null, writableChar=null;
+    let lastSentAngle = null;
+    let lastWriteTs = 0;
+
+    connectBtBtn.onclick = async()=>{
+      try{
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix:'BBC micro:bit' }, { namePrefix:'micro:bit' }],
+          optionalServices: [NUS_UUID]
+        });
+        device.addEventListener('gattserverdisconnected', ()=>{ writableChar=null; log('BT: disconnected'); });
+        server = await device.gatt.connect();
+        const svc = await server.getPrimaryService(NUS_UUID);
+        const chars = await svc.getCharacteristics();
+        writableChar = chars.find(c => c.properties.write || c.properties.writeWithoutResponse) || null;
+        if (!writableChar){
+          const dump = await Promise.all(chars.map(async c=>{
+            const p=c.properties; return `${c.uuid} -> write:${!!p.write} wwr:${!!p.writeWithoutResponse}`;
+          }));
+          throw new Error('No writable char in NUS:\\n'+dump.join('\\n'));
+        }
+        log('BT: connected (char '+writableChar.uuid+')');
+      }catch(e){ alert(e.message || e); }
+    };
+
+    async function sendAngle(angle){
+      if (!writableChar || !device?.gatt?.connected) return;
+      if (lastSentAngle !== null && Math.abs(angle - lastSentAngle) < 1) return; // ignore tiny changes
+      const now = performance.now();
+      const interval = clamp(Number(rateInput.value)|0, 40, 500);
+      if (now - lastWriteTs < interval) return;  // throttle writes
+      lastWriteTs = now;
+
+      const payload = new TextEncoder().encode(String(angle) + "\\n");
+      try{
+        if (writableChar.properties.writeWithoutResponse && writableChar.writeValueWithoutResponse){
+          await writableChar.writeValueWithoutResponse(payload);
+        } else {
+          await writableChar.writeValue(payload);
+        }
+        lastSentAngle = angle;
+      }catch(e){ log('BT write error: '+(e.message||e)); }
     }
   </script>
 </body>
