@@ -2,66 +2,78 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Face → Servo (simple, 1s updates)</title>
+  <title>Face → Servo (controls)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
-    input, button { font-size: 1rem; }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:10px 0; }
+    input, button, label { font-size: 1rem; }
     #angleOut, #status { font-family: ui-monospace, Menlo, Consolas, monospace; }
-    video { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+    video { position:absolute; opacity:0; width:1px; height:1px; pointer-events:none; }
   </style>
 </head>
 <body>
-  <h1>Face → Servo (simple)</h1>
+  <h1>Face → Servo</h1>
 
   <div class="row">
     <button id="startCam">Start Camera</button>
     <button id="connectBt">Connect micro:bit</button>
+    <label><input type="checkbox" id="invertChk"> Invert direction</label>
   </div>
 
   <div class="row">
-    <strong>Auto angle (every 1000 ms):</strong> <span id="angleOut">--</span>°
+    <label>Rate (ms) <input id="rate" type="number" min="40" max="2000" value="1000" style="width:90px"></label>
+    <label>Gain <input id="gain" type="range" min="10" max="90" value="60"></label><span id="gainVal">60°</span>
+    <label>Dead-zone <input id="dead" type="range" min="0" max="20" value="6"></label><span id="deadVal">6%</span>
+    <label>Smoothing <input id="smooth" type="range" min="0" max="95" value="70"></label><span id="smoothVal">0.70</span>
+    <label>Min <input id="amin" type="number" min="0" max="180" value="30" style="width:70px"></label>
+    <label>Max <input id="amax" type="number" min="0" max="180" value="150" style="width:70px"></label>
   </div>
 
   <div class="row">
-    <label>Manual angle
-      <input id="manual" type="number" min="0" max="180" value="90" style="width:80px" />
-    </label>
+    <strong>Auto angle:</strong> <span id="angleOut">--</span>°
+  </div>
+
+  <div class="row">
+    <label>Manual angle <input id="manual" type="number" min="0" max="180" value="90" style="width:80px"></label>
     <button id="sendManual">Send</button>
   </div>
 
   <div id="status">Ready.</div>
-
-  <!-- Hidden camera element -->
   <video id="video" autoplay playsinline muted></video>
 
   <!-- MediaPipe Tasks Vision (ES Modules) -->
   <script type="module">
     import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9";
 
-    // --- UI refs
+    // ---- UI refs
+    const video = document.getElementById('video');
     const startCamBtn = document.getElementById('startCam');
     const connectBtBtn = document.getElementById('connectBt');
+    const invertChk = document.getElementById('invertChk');
+
+    const rateInput = document.getElementById('rate');
+    const gainInput = document.getElementById('gain');   const gainVal = document.getElementById('gainVal');
+    const deadInput = document.getElementById('dead');   const deadVal = document.getElementById('deadVal');
+    const smoothInput = document.getElementById('smooth'); const smoothVal = document.getElementById('smoothVal');
+    const minInput = document.getElementById('amin');    const maxInput = document.getElementById('amax');
+
     const angleOut = document.getElementById('angleOut');
     const manual = document.getElementById('manual');
     const sendManualBtn = document.getElementById('sendManual');
     const statusEl = document.getElementById('status');
-    const video = document.getElementById('video');
 
+    const clamp = (n, lo, hi)=>Math.max(lo, Math.min(hi, n));
     const setStatus = s => statusEl.textContent = s;
-    const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
-    // --- Face tracking (no UI controls, just fixed params)
-    let landmarker = null;
-    let running = false;
-    let haveFace = false;
-    let emaX = 0;                // smoothed x offset (-1..+1)
-    const SMOOTH_K = 0.7;        // fixed smoothing
-    const DEAD = 0.06;           // fixed dead-zone (~6% of width)
-    const GAIN_DEG = 60;         // ±60° around center at full deflection
-    const MIN_ANGLE = 30, MAX_ANGLE = 150;
+    // reflect sliders
+    gainInput.oninput = ()=> gainVal.textContent = gainInput.value + '°';
+    deadInput.oninput = ()=> deadVal.textContent = deadInput.value + '%';
+    smoothInput.oninput = ()=> smoothVal.textContent = (Number(smoothInput.value)/100).toFixed(2);
 
+    // ---- Face tracking
+    let landmarker = null, running = false, haveFace = false;
+    let emaX = 0;  // smoothed -1..+1
     let latestAngle = 90;
 
     startCamBtn.onclick = async () => {
@@ -70,8 +82,7 @@
           video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false
         });
-        video.srcObject = stream;
-        await video.play();
+        video.srcObject = stream; await video.play();
 
         const fileset = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.9/wasm"
@@ -87,6 +98,7 @@
 
         running = true;
         requestAnimationFrame(loop);
+        resetTicker(); // start the 1..2000ms send loop
         setStatus('Camera + Landmarker running…');
       } catch (e) {
         alert(e.message || e);
@@ -94,17 +106,22 @@
     };
 
     function computeAngleFromX(xNorm) {
-      // xNorm: -1 (left) .. +1 (right)
-      emaX = (1 - SMOOTH_K) * xNorm + SMOOTH_K * emaX;
+      // smoothing
+      const k = Number(smoothInput.value)/100; // 0..0.95
+      emaX = (1 - k) * xNorm + k * emaX;
 
-      // Apply dead-zone
-      const err = emaX;
-      const mag = Math.max(0, Math.abs(err) - DEAD) / (1 - DEAD); // 0..1
+      // dead-zone
+      const dead = Number(deadInput.value)/100;     // 0..0.20
+      let err = emaX;
+      if (invertChk.checked) err = -err;
+
+      const mag = Math.max(0, Math.abs(err) - dead) / (1 - dead); // 0..1
       const signed = Math.sign(err) * mag;
 
-      // Map to angle around 90°
-      const angle = clamp(Math.round(90 + signed * GAIN_DEG), MIN_ANGLE, MAX_ANGLE);
-      return angle;
+      // map to angle
+      const gain = Number(gainInput.value);        // degrees from center at full deflection
+      const minA = Number(minInput.value), maxA = Number(maxInput.value);
+      return clamp(Math.round(90 + signed * gain), minA, maxA);
     }
 
     async function loop() {
@@ -113,30 +130,36 @@
         const res = landmarker.detectForVideo(video, performance.now());
         if (res?.faceLandmarks?.length) {
           const l = res.faceLandmarks[0];
-          let x = 0; for (let i = 0; i < l.length; i++) x += l[i].x; x /= l.length; // 0..1
-          const xNorm = (x - 0.5) * 2; // -1..+1
-          latestAngle = computeAngleFromX(xNorm);
+          let x = 0; for (let i=0;i<l.length;i++) x += l[i].x; x /= l.length;  // 0..1
+          latestAngle = computeAngleFromX((x - 0.5) * 2); // -1..+1
           haveFace = true;
         } else {
           haveFace = false;
-          // gently relax toward center
-          emaX *= 0.98;
+          emaX *= 0.98; // relax toward center
           latestAngle = 90;
         }
-      } catch { /* ignore transient */ }
+      } catch {}
       requestAnimationFrame(loop);
     }
 
-    // --- Update display + auto-send every 1000 ms
-    setInterval(() => {
-      angleOut.textContent = String(latestAngle);
-      if (haveFace) sendAngle(latestAngle, /*force*/false);
-      else setStatus('No face — not sending.');
-    }, 1000);
+    // ---- Periodic display + send (rate adjustable)
+    let tickTimer = null;
+    function resetTicker(){
+      if (tickTimer) { clearTimeout(tickTimer); tickTimer = null; }
+      const tick = () => {
+        angleOut.textContent = String(latestAngle);
+        if (haveFace) sendAngle(latestAngle, /*force*/false);
+        const ms = clamp(Number(rateInput.value)|0, 40, 2000);
+        tickTimer = setTimeout(tick, ms);
+      };
+      tick();
+    }
+    rateInput.addEventListener('change', resetTicker);
 
-    // --- Bluetooth (Nordic UART, writable char auto-detected)
+    // ---- Bluetooth (Nordic UART)
     const NUS_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-    let device = null, server = null, writableChar = null;
+    let device=null, server=null, writableChar=null;
+    let lastSentAngle = null;
 
     connectBtBtn.onclick = async () => {
       if (!('bluetooth' in navigator)) { alert('Web Bluetooth not supported'); return; }
@@ -145,9 +168,7 @@
           filters: [{ namePrefix: 'BBC micro:bit' }, { namePrefix: 'micro:bit' }],
           optionalServices: [NUS_UUID]
         });
-        device.addEventListener('gattserverdisconnected', () => {
-          writableChar = null; setStatus('Bluetooth: disconnected.');
-        });
+        device.addEventListener('gattserverdisconnected', ()=>{ writableChar=null; setStatus('Bluetooth: disconnected.'); });
         server = await device.gatt.connect();
         const svc = await server.getPrimaryService(NUS_UUID);
         const chars = await svc.getCharacteristics();
@@ -158,7 +179,7 @@
           }));
           throw new Error('No writable UART characteristic:\n' + dump.join('\n'));
         }
-        setStatus('Bluetooth: connected. Auto-sending every 1000 ms when a face is seen.');
+        setStatus('Bluetooth: connected.');
       } catch (e) {
         alert(e.message || e);
         setStatus('Connect error: ' + (e.message || e));
@@ -166,37 +187,31 @@
     };
 
     async function sendAngle(angle, force=false) {
-      if (!writableChar || !device?.gatt?.connected) {
-        setStatus('Not connected — cannot send.');
-        return;
-      }
-      // Optional: tiny dedupe if not forced (keeps traffic light)
-      if (!force && sendAngle._last === angle) {
-        setStatus('Angle unchanged — skipping send.');
-        return;
-      }
-      const data = new TextEncoder().encode(String(clamp(angle, 0, 180)) + "\n");
+      if (!writableChar || !device?.gatt?.connected) { setStatus('Not connected — cannot send.'); return; }
+      const a = clamp(Number(angle)|0, 0, 180);
+      if (!force && lastSentAngle !== null && Math.abs(a - lastSentAngle) < 1) { return; }
+      const data = new TextEncoder().encode(String(a) + "\n");
       try {
         if (writableChar.properties.writeWithoutResponse && writableChar.writeValueWithoutResponse) {
           await writableChar.writeValueWithoutResponse(data);
         } else {
           await writableChar.writeValue(data);
         }
-        sendAngle._last = angle;
-        setStatus('Sent angle: ' + angle + '°');
+        lastSentAngle = a;
+        setStatus('Sent angle: ' + a + '°');
       } catch (e) {
         setStatus('Send error: ' + (e.message || e));
         console.error(e);
       }
     }
 
-    // Manual send
-    sendManualBtn.onclick = () => {
-      const a = clamp(Number(manual.value) | 0, 0, 180);
+    // manual send
+    document.getElementById('sendManual').onclick = () => {
+      const a = clamp(Number(manual.value)|0, 0, 180);
       manual.value = String(a);
       sendAngle(a, /*force*/true);
     };
-    manual.addEventListener('keydown', e => { if (e.key === 'Enter') sendManualBtn.click(); });
+    manual.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('sendManual').click(); });
   </script>
 </body>
 </html>
