@@ -1,87 +1,51 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>NUS Write Debug</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style> body { font-family: system-ui, sans-serif; margin: 16px; } pre { white-space: pre-wrap; } </style>
-</head>
-<body>
-  <h1>NUS Write Debug</h1>
-  <button id="go">Connect & Send "42\\n"</button>
-  <pre id="log"></pre>
-
 <script>
-const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const UART_RX_CHAR = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // Write here
+const NUS_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 
-const logEl = document.getElementById('log');
-function log(...a){ const s=a.map(x=>typeof x==='object'?JSON.stringify(x):String(x)).join(' '); console.log(s); logEl.textContent += s + '\n'; }
+let device, server, nusService, writableChar;
 
-let device, server, rx;
-
-async function pickDevice(){
-  return navigator.bluetooth.requestDevice({
+async function pickDevice() {
+  device = await navigator.bluetooth.requestDevice({
     filters: [{ namePrefix: 'BBC micro:bit' }, { namePrefix: 'micro:bit' }],
-    optionalServices: [UART_SERVICE]
+    optionalServices: [NUS_UUID]
   });
+  device.addEventListener('gattserverdisconnected', ()=>console.log('Disconnected'));
 }
 
-async function connect(){
+async function connectAndFindWritable() {
   server = await device.gatt.connect();
-  const svc = await server.getPrimaryService(UART_SERVICE);
-  rx = await svc.getCharacteristic(UART_RX_CHAR);
-  log('Connected. RX props:', {
-    write: !!rx.properties.write,
-    writeWithoutResponse: !!rx.properties.writeWithoutResponse,
-    reliableWrite: !!rx.properties.reliableWrite
-  });
+  nusService = await server.getPrimaryService(NUS_UUID);
+
+  const chars = await nusService.getCharacteristics();
+  // Find any characteristic that supports write or writeWithoutResponse
+  writableChar = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
+
+  if (!writableChar) {
+    const list = await Promise.all(chars.map(async c => {
+      const p = c.properties;
+      return `${c.uuid} -> write:${!!p.write} wwr:${!!p.writeWithoutResponse} notify:${!!p.notify}`;
+    }));
+    throw new Error('No writable characteristic found.\n' + list.join('\n'));
+  }
+
+  console.log('Using writable char:', writableChar.uuid, writableChar.properties);
 }
 
-async function writeOnce(text){
+async function sendLine(text) {
+  if (!writableChar) throw new Error('Not connected');
   const data = new TextEncoder().encode(text);
-
-  // Try WWR first
-  if (rx.writeValueWithoutResponse && rx.properties.writeWithoutResponse) {
-    try {
-      await rx.writeValueWithoutResponse(data);
-      log('writeValueWithoutResponse OK');
-      return;
-    } catch(e) {
-      log('writeValueWithoutResponse ERROR:', e?.name || e, e?.message || '');
-    }
+  if (writableChar.properties.writeWithoutResponse && writableChar.writeValueWithoutResponse) {
+    await writableChar.writeValueWithoutResponse(data);
+  } else {
+    await writableChar.writeValue(data);
   }
-
-  // Fallback to write with response
-  if (rx.properties.write) {
-    try {
-      await rx.writeValue(data);
-      log('writeValue OK');
-      return;
-    } catch(e) {
-      log('writeValue ERROR:', e?.name || e, e?.message || '');
-      throw e;
-    }
-  }
-
-  throw new Error('Characteristic has no write capability.');
 }
 
-document.getElementById('go').addEventListener('click', async () => {
-  if (!('bluetooth' in navigator)) { alert('Web Bluetooth not supported'); return; }
-  try {
-    device = await pickDevice();
-    device.addEventListener('gattserverdisconnected', () => log('Disconnected'));
-    await connect();
-    // give the stack a short settle time
-    await new Promise(r => setTimeout(r, 200));
-    await writeOnce('42\n');
-    log('Done.');
-  } catch(e) {
-    log('FATAL:', e?.name || e, e?.message || '');
-    alert('Error: ' + (e?.message || e));
-  }
-});
+async function connectAndSendOnce() {
+  await pickDevice();
+  await connectAndFindWritable();
+  await new Promise(r => setTimeout(r, 200));
+  await sendLine('42\n');
+  alert('Sent 42!');
+}
 </script>
-</body>
-</html>
+<button onclick="connectAndSendOnce()">Connect & Send 42</button>
