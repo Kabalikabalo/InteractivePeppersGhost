@@ -2,269 +2,157 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>micro:bit Face Follow</title>
+  <title>Face Center Arrow</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { --pad: 14px; }
-    body { margin: var(--pad); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    h1 { margin: 0 0 8px; font-size: 1.25rem; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
-    button, input, select { font-size: 1rem; }
-    #stage { position: relative; width: min(100%, 720px); aspect-ratio: 4/3; background: #111; border-radius: 8px; overflow: hidden; }
-    #video, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
-    #video { object-fit: cover; transform: scaleX(-1); } /* mirror front cam for human-friendly view */
-    #overlay { pointer-events: none; }
-    #status { font-family: ui-monospace, Menlo, Consolas, monospace; white-space: pre-line; }
-    .small { font-size: 0.9rem; opacity: 0.8; }
-    .slider { width: 220px; }
+    :root { --fg: #111; --muted:#666; --ok:#0a0; --warn:#c70; }
+    html,body { height:100%; margin:0; }
+    body { display:grid; place-items:center; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+    .wrap { display:flex; flex-direction:column; align-items:center; gap:10px; padding:20px; }
+    h1 { margin:0 0 6px; font-size:1.2rem; color:var(--fg); }
+    .row { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; align-items:center; }
+    button, input { font-size:1rem; }
+    #arrow {
+      font-size: 96px; line-height:1; user-select:none;
+      transition: transform .08s linear, color .15s ease, opacity .15s ease;
+      color: var(--fg);
+    }
+    #arrow.dim { opacity:.35; color: var(--muted); }
+    #status { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); text-align:center; }
+    #hint { font-size:.9rem; color:var(--muted); }
+    /* we keep the video hidden; FaceDetector still reads from it */
+    video { position:absolute; opacity:0; width:1px; height:1px; pointer-events:none; }
   </style>
 </head>
 <body>
-  <h1>micro:bit Face Follow</h1>
+  <div class="wrap">
+    <h1>Face Center Arrow</h1>
 
-  <div class="row">
-    <button id="cam">Start Camera</button>
-    <button id="bt">Connect micro:bit</button>
-    <button id="center">Center (90°)</button>
-    <label class="small">Tracking:
-      <select id="mode">
-        <option value="on" selected>On</option>
-        <option value="hold">Hold (don’t send)</option>
-      </select>
-    </label>
-  </div>
+    <div class="row">
+      <button id="start">Start</button>
+      <button id="center">Re-center</button>
+      <label>Dead-zone
+        <input id="dead" type="range" min="1" max="20" value="6" />
+        <span id="deadVal">6%</span>
+      </label>
+      <label>Smoothing
+        <input id="smooth" type="range" min="0" max="95" value="70" />
+        <span id="smoothVal">0.70</span>
+      </label>
+    </div>
 
-  <div class="row">
-    <label>Gain
-      <input id="gain" type="range" min="10" max="90" value="60" class="slider" />
-      <span id="gainVal">60</span>°
-    </label>
-    <label>Min
-      <input id="amin" type="number" value="30" min="0" max="180" />
-    </label>
-    <label>Max
-      <input id="amax" type="number" value="150" min="0" max="180" />
-    </label>
-    <label>Smooth
-      <input id="smooth" type="range" min="0" max="95" value="70" class="slider" />
-      <span id="smoothVal">0.70</span>
-    </label>
-  </div>
+    <div id="arrow" class="dim">⌖</div>
+    <div id="status">ready.</div>
+    <div id="hint">start → look at the phone → follow the arrow until “centered”.</div>
 
-  <div id="stage">
     <video id="video" autoplay playsinline muted></video>
-    <canvas id="overlay"></canvas>
   </div>
-
-  <p id="status">Ready.</p>
 
   <script>
-    // ---------- Bluetooth (find writable NUS characteristic automatically)
-    const NUS_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-    let device, server, writableChar = null;
-
-    async function pickDevice() {
-      device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: 'BBC micro:bit' }, { namePrefix:'micro:bit' }],
-        optionalServices: [NUS_UUID]
-      });
-      device.addEventListener('gattserverdisconnected', () => {
-        writableChar = null;
-        log('BT: disconnected');
-      });
-      return device;
-    }
-
-    async function connectAndFindWritable() {
-      server = await device.gatt.connect();
-      const svc = await server.getPrimaryService(NUS_UUID);
-      const chars = await svc.getCharacteristics();
-      writableChar = chars.find(c => c.properties.write || c.properties.writeWithoutResponse) || null;
-      if (!writableChar) {
-        const dump = await Promise.all(chars.map(async c => {
-          const p = c.properties;
-          return `${c.uuid} -> write:${!!p.write} wwr:${!!p.writeWithoutResponse}`;
-        }));
-        throw new Error('No writable char in NUS:\n' + dump.join('\n'));
-      }
-      log('BT: ready (char ' + writableChar.uuid + ')');
-    }
-
-    let writeBusy = false, lastWriteTs = 0;
-    const writeIntervalMs = 100;   // don’t spam—100 ms is smooth enough
-
-    async function sendLine(text) {
-      if (!writableChar || !device?.gatt?.connected) return;
-      const now = performance.now();
-      if (now - lastWriteTs < writeIntervalMs) return;
-      lastWriteTs = now;
-
-      const data = new TextEncoder().encode(text);
-      try {
-        if (writableChar.properties.writeWithoutResponse && writableChar.writeValueWithoutResponse) {
-          await writableChar.writeValueWithoutResponse(data);
-        } else {
-          await writableChar.writeValue(data);
-        }
-      } catch (e) {
-        log('BT write err: ' + (e.message || e));
-      }
-    }
-
-    // ---------- Camera + Face detection
     const video = document.getElementById('video');
-    const canvas = document.getElementById('overlay');
-    const ctx = canvas.getContext('2d');
-    const MIRROR_FOR_VIEW = true; // we mirrored the video for display; fix direction math below
-
-    let detector = null;
-    let tracking = true;
-
-    async function startCamera() {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false
-      });
-      video.srcObject = stream;
-      await video.play();
-      sizeCanvas();
-      await ensureDetector();
-      requestAnimationFrame(loop);
-      log('Camera: started');
-    }
-
-    function sizeCanvas() {
-      const w = video.videoWidth || 640, h = video.videoHeight || 480;
-      canvas.width = w; canvas.height = h;
-    }
-
-    async function ensureDetector() {
-      if ('FaceDetector' in window) {
-        detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
-        log('FaceDetector: using Shape Detection API');
-      } else {
-        detector = null;
-        log('FaceDetector: NOT available in this browser.\nTry Chrome/Edge, or ask me for a TF.js fallback.');
-      }
-    }
-
-    // ---------- Mapping + smoothing
-    let neutral = 90;
-    const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-    function mapOffsetToAngle(xNorm /* -1..+1 */) {
-      const gain = Number(gainInput.value); // degrees span from center at +/-1
-      const minA = Number(minInput.value);
-      const maxA = Number(maxInput.value);
-      const mirr = MIRROR_FOR_VIEW ? -1 : 1; // because we flipped the preview
-      const angle = neutral + mirr * (xNorm * gain);
-      return clamp(Math.round(angle), minA, maxA);
-    }
-
-    // EMA smoothing for the horizontal face center
-    let emaX = 0;  // -1..+1
-    function smoothX(newX) {
-      const k = Number(smoothInput.value)/100; // 0..0.95
-      emaX = (1 - k) * newX + k * emaX;
-      return emaX;
-    }
-
-    let lastSentAngle = null;
-
-    async function loop() {
-      if (!video.srcObject) return;
-
-      // Resize canvas if camera changed orientation
-      if (canvas.width !== video.videoWidth) sizeCanvas();
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      if (detector && tracking) {
-        try {
-          const faces = await detector.detect(video);
-          if (faces && faces.length) {
-            const bb = faces[0].boundingBox;
-            // draw box
-            ctx.strokeStyle = 'white';
-            ctx.lineWidth = 3;
-            ctx.strokeRect(bb.x, bb.y, bb.width, bb.height);
-
-            // face center in pixels
-            const cx = bb.x + bb.width/2;
-            const w = canvas.width;
-            // normalize (center=0, left=-1, right=+1)
-            const xNorm = ((cx / w) - 0.5) * 2;
-            const xSmooth = smoothX(xNorm);
-
-            const angle = mapOffsetToAngle(xSmooth);
-            drawHud(cx, angle);
-
-            if (modeSel.value === 'on') {
-              // send only if changed meaningfully
-              if (lastSentAngle === null || Math.abs(angle - lastSentAngle) >= 1) {
-                await sendLine(String(angle) + '\n');
-                lastSentAngle = angle;
-              }
-            }
-          } else {
-            drawNoFace();
-          }
-        } catch (e) {
-          // detector hiccup—just log once in a while
-        }
-      }
-      requestAnimationFrame(loop);
-    }
-
-    function drawHud(cx, angle) {
-      const w = canvas.width, h = canvas.height;
-      // center line
-      ctx.beginPath();
-      ctx.moveTo(w/2, 0); ctx.lineTo(w/2, h);
-      ctx.setLineDash([6,4]); ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.stroke(); ctx.setLineDash([]);
-      // target line
-      ctx.beginPath();
-      ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
-      ctx.strokeStyle = 'lime'; ctx.stroke();
-      // text
-      ctx.fillStyle = 'lime';
-      ctx.font = '16px ui-monospace, monospace';
-      ctx.fillText(`angle: ${angle}°`, 10, 22);
-    }
-
-    function drawNoFace() {
-      const w = canvas.width;
-      ctx.fillStyle = 'rgba(255,255,255,.85)';
-      ctx.font = '16px ui-monospace, monospace';
-      ctx.fillText('No face', 10, 22);
-      // slowly relax toward center
-      emaX *= 0.95;
-    }
-
-    // ---------- UI wiring
-    const camBtn = document.getElementById('cam');
-    const btBtn = document.getElementById('bt');
+    const startBtn = document.getElementById('start');
     const centerBtn = document.getElementById('center');
-    const gainInput = document.getElementById('gain');
-    const gainVal = document.getElementById('gainVal');
-    const minInput = document.getElementById('amin');
-    const maxInput = document.getElementById('amax');
+    const arrowEl = document.getElementById('arrow');
+    const statusEl = document.getElementById('status');
+    const deadInput = document.getElementById('dead');
+    const deadVal = document.getElementById('deadVal');
     const smoothInput = document.getElementById('smooth');
     const smoothVal = document.getElementById('smoothVal');
-    const modeSel = document.getElementById('mode');
-    const statusEl = document.getElementById('status');
 
-    camBtn.onclick = async () => {
-      try { await startCamera(); } catch(e) { alert(e.message || e); }
+    let detector = null;
+    let neutral = 0;         // neutral offset (xNorm) after recentering
+    let emaX = 0;            // smoothed x offset (-1..+1)
+    let running = false;
+
+    function log(s){ statusEl.textContent = s; }
+    function clamp(n, lo, hi){ return Math.max(lo, Math.min(hi, n)); }
+
+    deadInput.oninput = () => deadVal.textContent = deadInput.value + '%';
+    smoothInput.oninput = () => smoothVal.textContent = (Number(smoothInput.value)/100).toFixed(2);
+
+    centerBtn.onclick = () => { neutral = emaX; log('re-centered'); };
+
+    startBtn.onclick = async () => {
+      if (!('FaceDetector' in window)) {
+        alert('FaceDetector API not available in this browser. Try Chrome/Edge. (I can add a TF.js fallback if you want.)');
+        return;
+      }
+      try {
+        // front camera; we hide the element, but it must be playing
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+        running = true;
+        requestAnimationFrame(loop);
+        log('running…');
+      } catch (e) {
+        console.error(e);
+        alert(e.message || e);
+      }
     };
-    btBtn.onclick = async () => {
-      try { await pickDevice(); await connectAndFindWritable(); } catch(e) { alert(e.message || e); }
-    };
-    centerBtn.onclick = () => { neutral = 90; lastSentAngle = null; sendLine('90\n'); };
 
-    gainInput.oninput = () => { gainVal.textContent = gainInput.value; };
-    smoothInput.oninput = () => { smoothVal.textContent = (Number(smoothInput.value)/100).toFixed(2); };
+    function setArrow(dir/* -1 left, 0 center, +1 right */, strength/*0..1*/) {
+      if (Math.abs(dir) < 0.01 && strength < 0.05) {
+        arrowEl.textContent = '✔';          // centered
+        arrowEl.classList.add('dim');
+        arrowEl.style.transform = 'scale(1)';
+        arrowEl.style.color = 'var(--ok)';
+        log('centered');
+        return;
+      }
+      arrowEl.classList.remove('dim');
+      arrowEl.style.color = 'var(--fg)';
+      // choose glyph
+      arrowEl.textContent = dir < 0 ? '←' : '→';
+      // scale with strength for an intuitive “how much”
+      const s = 1 + 1.2 * clamp(strength, 0, 1);
+      arrowEl.style.transform = `scale(${s})`;
+      log((dir < 0 ? 'turn left ' : 'turn right ') + Math.round(strength * 100) + '%');
+    }
 
-    function log(s) { statusEl.textContent = s; }
+    async function loop() {
+      if (!running) return;
+
+      try {
+        const faces = await detector.detect(video);
+        if (faces && faces.length) {
+          const bb = faces[0].boundingBox;
+          const cx = bb.x + bb.width/2;
+          const w = video.videoWidth || 640;
+          // normalize face center: left=-1, center=0, right=+1
+          let xNorm = ((cx / w) - 0.5) * 2;
+
+          // smoothing (EMA)
+          const k = Number(smoothInput.value)/100; // 0..0.95
+          emaX = (1 - k) * xNorm + k * emaX;
+
+          // apply user neutral (recenter)
+          const err = emaX - neutral;
+
+          const dead = Number(deadInput.value) / 100; // dead-zone in normalized units
+          const mag = Math.max(0, Math.abs(err) - dead) / (1 - dead); // 0..1 after dead-zone
+          const dir = Math.sign(err);
+
+          setArrow(dir, mag);
+        } else {
+          arrowEl.textContent = '⌖'; // aim/idle
+          arrowEl.classList.add('dim');
+          arrowEl.style.transform = 'scale(1)';
+          arrowEl.style.color = 'var(--muted)';
+          log('no face');
+          // slowly relax toward center to avoid drift
+          emaX *= 0.98;
+        }
+      } catch (e) {
+        // ignore transient detector errors
+      }
+      requestAnimationFrame(loop);
+    }
   </script>
 </body>
 </html>
